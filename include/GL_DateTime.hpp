@@ -10,9 +10,13 @@
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+#include <cmath>
+#include <cstdint>
+#include <climits>
+#include <cstring>
 
 /*
-    I noticed that C# automatically sets the language for its standard libraries, 
+    I noticed that C# automatically sets the language for its standard libraries,
     so the DateTime type in C# always uses the system's default language.
 
     To make DateTime support other languages, call the setlocale function from locale.h.
@@ -25,719 +29,1361 @@
     setlocale(LC_ALL, "Chinese (Simplified)_China.UTF-8");
 */
 
+namespace detail
+{
+    constexpr int64_t TicksPerMillisecond = 10000;
+    constexpr int64_t TicksPerSecond = TicksPerMillisecond * 1000;
+    constexpr int64_t TicksPerMinute = TicksPerSecond * 60;
+    constexpr int64_t TicksPerHour = TicksPerMinute * 60;
+    constexpr int64_t TicksPerDay = TicksPerHour * 24;
+
+    constexpr int DaysTo1970 = 719162;
+    constexpr int DaysTo10000 = 3652059; // days from 1/1/0001 to 1/1/10000
+    constexpr int64_t MinTicks = 0;
+    constexpr int64_t MaxTicks = static_cast<int64_t>(DaysTo10000) * TicksPerDay - 1;
+    constexpr int64_t UnixEpochTicks = static_cast<int64_t>(DaysTo1970) * TicksPerDay;
+
+    static bool is_leap_year(int year)
+    {
+        return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    }
+
+    static int days_in_month(int year, int month)
+    {
+        static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        if (month == 2 && is_leap_year(year))
+            return 29;
+        return days[month - 1];
+    }
+
+    static int64_t date_to_ticks(int year, int month, int day)
+    {
+        if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31)
+            throw std::runtime_error("Invalid date parameters");
+        int max_day = days_in_month(year, month);
+        if (day > max_day)
+            throw std::runtime_error("Day is out of range for the month");
+        int y = year - 1;
+        int64_t numDays = (int64_t)y * 365 + y / 4 - y / 100 + y / 400;
+        static const int d365[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
+        static const int d366[] = {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366};
+        numDays += is_leap_year(year) ? d366[month - 1] : d365[month - 1];
+        numDays += day - 1;
+        return numDays * TicksPerDay;
+    }
+
+    static void ticks_to_date(int64_t ticks, int &year, int &month, int &day)
+    {
+        if (ticks < 0)
+            throw std::runtime_error("Ticks must be non-negative");
+        int64_t days = ticks / TicksPerDay;
+        int y400 = (int)(days / 146097);
+        days -= y400 * 146097LL;
+        int y100 = (int)(days / 36524);
+        if (y100 == 4)
+            y100 = 3;
+        days -= y100 * 36524LL;
+        int y4 = (int)(days / 1461);
+        days -= y4 * 1461LL;
+        int y1 = (int)(days / 365);
+        if (y1 == 4)
+            y1 = 3;
+        days -= y1 * 365LL;
+        year = y400 * 400 + y100 * 100 + y4 * 4 + y1 + 1;
+        static const int d365[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365};
+        static const int d366[] = {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366};
+        const int *d2m = is_leap_year(year) ? d366 : d365;
+        for (month = 1; month <= 12; month++)
+        {
+            if ((int)days < d2m[month])
+            {
+                day = (int)days - d2m[month - 1] + 1;
+                return;
+            }
+        }
+        month = 12;
+        day = 31;
+    }
+}
+
 /**
- * @brief A imitation of the C# DateTime class, with nearly identical functionality.
- * @note One of the few differences: the format specifier single 't' (for AM/PM indicator) is not supported in ToString(). This class treats a single 't' as two 't's, which displays AM for morning and PM for afternoon.
-*/
-class DateTime {
+ * @brief 模仿 System.DateTimeKind，指示 DateTime 表示的是本地时间、UTC 时间还是未指定。
+ *
+ * - Unspecified: 时间未指定为本地或 UTC（默认）
+ * - Utc: 协调世界时（UTC）
+ * - Local: 本地时间
+ */
+enum class DateTimeKind
+{
+    Unspecified = 0,
+    Utc = 1,
+    Local = 2
+};
+
+class DateTime;
+
+/**
+ * @brief 模仿 System.TimeSpan 的时间间隔类。
+ *
+ * 表示一个时间间隔（以 100纳秒 为单位的刻度数），提供与 C# TimeSpan 一致的接口。
+ *
+ * 所有属性均使用 GetXxx() 命名（因为 C++ 没有属性语法）。
+ *
+ * 使用示例:
+ * @code{.cpp}
+ *   TimeSpan ts(1, 2, 30, 0);         // 1天2小时30分钟
+ *   double days = ts.GetTotalDays();   // ≈ 1.104
+ *   TimeSpan ts2 = TimeSpan::FromHours(3.5);
+ * @endcode
+ */
+class TimeSpan
+{
 private:
-    std::chrono::system_clock::time_point time_point_;
-    
-    static std::chrono::system_clock::time_point tm_to_time_point(const std::tm& tm) {
-        std::time_t tt = std::mktime(const_cast<std::tm*>(&tm));
-        if (tt == -1) {
-            throw std::runtime_error("Invalid time structure");
-        }
-        return std::chrono::system_clock::from_time_t(tt);
+    int64_t ticks_;
+
+    static double ticks_to_double(int64_t ticks, int64_t ticksPerUnit)
+    {
+        return static_cast<double>(ticks) / static_cast<double>(ticksPerUnit);
     }
-    
-    std::tm get_tm() const {
-        std::time_t tt = std::chrono::system_clock::to_time_t(time_point_);
+
+    static int64_t double_to_ticks(double value, double ticksPerUnit)
+    {
+        return static_cast<int64_t>(std::round(value * ticksPerUnit));
+    }
+
+public:
+    /**
+     * @brief 构造一个零值的 TimeSpan。
+     */
+    TimeSpan() : ticks_(0) {}
+
+    /**
+     * @brief 从指定的刻度数构造 TimeSpan。
+     * @param ticks 时间间隔的刻度数（1 刻度 = 100 纳秒）
+     */
+    explicit TimeSpan(int64_t ticks) : ticks_(ticks) {}
+
+    /**
+     * @brief 从指定的小时、分钟和秒数构造 TimeSpan。
+     * @param hours 小时（可正可负）
+     * @param minutes 分钟
+     * @param seconds 秒
+     */
+    TimeSpan(int hours, int minutes, int seconds)
+        : ticks_(
+              static_cast<int64_t>(hours) * detail::TicksPerHour +
+              static_cast<int64_t>(minutes) * detail::TicksPerMinute +
+              static_cast<int64_t>(seconds) * detail::TicksPerSecond) {}
+
+    /**
+     * @brief 从指定的天、小时、分钟和秒数构造 TimeSpan。
+     * @param days 天
+     * @param hours 小时
+     * @param minutes 分钟
+     * @param seconds 秒
+     */
+    TimeSpan(int days, int hours, int minutes, int seconds)
+        : ticks_(
+              static_cast<int64_t>(days) * detail::TicksPerDay +
+              static_cast<int64_t>(hours) * detail::TicksPerHour +
+              static_cast<int64_t>(minutes) * detail::TicksPerMinute +
+              static_cast<int64_t>(seconds) * detail::TicksPerSecond) {}
+
+    /**
+     * @brief 从指定的天、小时、分钟、秒和毫秒数构造 TimeSpan。
+     * @param days 天
+     * @param hours 小时
+     * @param minutes 分钟
+     * @param seconds 秒
+     * @param milliseconds 毫秒
+     */
+    TimeSpan(int days, int hours, int minutes, int seconds, int milliseconds)
+        : ticks_(
+              static_cast<int64_t>(days) * detail::TicksPerDay +
+              static_cast<int64_t>(hours) * detail::TicksPerHour +
+              static_cast<int64_t>(minutes) * detail::TicksPerMinute +
+              static_cast<int64_t>(seconds) * detail::TicksPerSecond +
+              static_cast<int64_t>(milliseconds) * detail::TicksPerMillisecond) {}
+
+    /** @brief 获取此 TimeSpan 的刻度数（1 刻度 = 100 纳秒）。 */
+    int64_t GetTicks() const { return ticks_; }
+    /** @brief 获取此 TimeSpan 的天数部分。 */
+    int GetDays() const { return static_cast<int>(ticks_ / detail::TicksPerDay); }
+    /** @brief 获取此 TimeSpan 的小时数部分（0~23）。 */
+    int GetHours() const { return static_cast<int>((ticks_ % detail::TicksPerDay) / detail::TicksPerHour); }
+    /** @brief 获取此 TimeSpan 的分钟数部分（0~59）。 */
+    int GetMinutes() const { return static_cast<int>((ticks_ % detail::TicksPerHour) / detail::TicksPerMinute); }
+    /** @brief 获取此 TimeSpan 的秒数部分（0~59）。 */
+    int GetSeconds() const { return static_cast<int>((ticks_ % detail::TicksPerMinute) / detail::TicksPerSecond); }
+    /** @brief 获取此 TimeSpan 的毫秒数部分（0~999）。 */
+    int GetMilliseconds() const { return static_cast<int>((ticks_ % detail::TicksPerSecond) / detail::TicksPerMillisecond); }
+
+    /** @brief 获取以整天为单位表示的时间间隔值。 */
+    double GetTotalDays() const { return ticks_to_double(ticks_, detail::TicksPerDay); }
+    /** @brief 获取以整小时为单位表示的时间间隔值。 */
+    double GetTotalHours() const { return ticks_to_double(ticks_, detail::TicksPerHour); }
+    /** @brief 获取以整分钟为单位表示的时间间隔值。 */
+    double GetTotalMinutes() const { return ticks_to_double(ticks_, detail::TicksPerMinute); }
+    /** @brief 获取以整秒为单位表示的时间间隔值。 */
+    double GetTotalSeconds() const { return ticks_to_double(ticks_, detail::TicksPerSecond); }
+    /** @brief 获取以整毫秒为单位表示的时间间隔值。 */
+    double GetTotalMilliseconds() const { return ticks_to_double(ticks_, detail::TicksPerMillisecond); }
+
+    /** @brief 返回零值的 TimeSpan（静态属性）。 */
+    static TimeSpan Zero() { return TimeSpan(0LL); }
+    /** @brief 返回最小的 TimeSpan 可能值（静态属性）。 */
+    static TimeSpan MinValue() { return TimeSpan(LLONG_MIN); }
+    /** @brief 返回最大的 TimeSpan 可能值（静态属性）。 */
+    static TimeSpan MaxValue() { return TimeSpan(LLONG_MAX); }
+
+    /**
+     * @brief 返回指定天数表示的 TimeSpan，精确到最接近的刻度。
+     * @param d 天数（精确到微秒）
+     */
+    static TimeSpan FromDays(double d) { return TimeSpan(double_to_ticks(d, (double)detail::TicksPerDay)); }
+    /**
+     * @brief 返回指定小时数表示的 TimeSpan，精确到最接近的刻度。
+     * @param h 小时数
+     */
+    static TimeSpan FromHours(double h) { return TimeSpan(double_to_ticks(h, (double)detail::TicksPerHour)); }
+    /**
+     * @brief 返回指定分钟数表示的 TimeSpan，精确到最接近的刻度。
+     * @param m 分钟数
+     */
+    static TimeSpan FromMinutes(double m) { return TimeSpan(double_to_ticks(m, (double)detail::TicksPerMinute)); }
+    /**
+     * @brief 返回指定秒数表示的 TimeSpan，精确到最接近的刻度。
+     * @param s 秒数
+     */
+    static TimeSpan FromSeconds(double s) { return TimeSpan(double_to_ticks(s, (double)detail::TicksPerSecond)); }
+    /**
+     * @brief 返回指定毫秒数表示的 TimeSpan，精确到最接近的刻度。
+     * @param ms 毫秒数
+     */
+    static TimeSpan FromMilliseconds(double ms) { return TimeSpan(double_to_ticks(ms, (double)detail::TicksPerMillisecond)); }
+
+    /**
+     * @brief 比较两个 TimeSpan 值。
+     * @param t1 第一个 TimeSpan
+     * @param t2 第二个 TimeSpan
+     * @return 如果 t1 < t2 则为 -1；如果相等则为 0；如果 t1 > t2 则为 1
+     */
+    static int Compare(const TimeSpan &t1, const TimeSpan &t2)
+    {
+        if (t1.ticks_ < t2.ticks_)
+            return -1;
+        if (t1.ticks_ > t2.ticks_)
+            return 1;
+        return 0;
+    }
+
+    /**
+     * @brief 判断两个 TimeSpan 值是否相等。
+     */
+    static bool Equals(const TimeSpan &t1, const TimeSpan &t2) { return t1.ticks_ == t2.ticks_; }
+
+    /**
+     * @brief 将两个 TimeSpan 相加。
+     * @param other 要添加的时间间隔
+     * @return 当前对象与 other 之和
+     */
+    TimeSpan Add(const TimeSpan &other) const { return TimeSpan(ticks_ + other.ticks_); }
+    /**
+     * @brief 两个 TimeSpan 相减。
+     * @param other 要减去的时间间隔
+     * @return 当前对象减去 other 的结果
+     */
+    TimeSpan Subtract(const TimeSpan &other) const { return TimeSpan(ticks_ - other.ticks_); }
+
+    /**
+     * @brief 返回绝对值的新 TimeSpan。
+     * @throw std::runtime_error 如果值为 MinValue（无法表示正值）
+     */
+    TimeSpan Duration() const
+    {
+        if (ticks_ == LLONG_MIN)
+            throw std::runtime_error("Cannot compute Duration of TimeSpan::MinValue");
+        return TimeSpan(ticks_ < 0 ? -ticks_ : ticks_);
+    }
+
+    /**
+     * @brief 返回相反数的新 TimeSpan。
+     * @throw std::runtime_error 如果值为 MinValue（无法表示正值）
+     */
+    TimeSpan Negate() const
+    {
+        if (ticks_ == LLONG_MIN)
+            throw std::runtime_error("Cannot negate TimeSpan::MinValue");
+        return TimeSpan(-ticks_);
+    }
+
+    /**
+     * @brief 与另一个 TimeSpan 比较。
+     * @return 如果当前实例 < other 则为 -1；相等则为 0；否则为 1
+     */
+    int CompareTo(const TimeSpan &other) const { return Compare(*this, other); }
+    /**
+     * @brief 判断当前 TimeSpan 与另一个是否相等。
+     */
+    bool Equals(const TimeSpan &other) const { return ticks_ == other.ticks_; }
+
+    /**
+     * @brief 将当前 TimeSpan 转换为标准字符串表示。
+     *
+     * 格式: [d.]hh:mm:ss[.fffffff]
+     * - 当毫秒非零时显示毫秒部分
+     * - 负值前面带有负号
+     *
+     * @return 格式化的时间间隔字符串
+     */
+    std::string ToString() const
+    {
+        if (ticks_ == LLONG_MIN)
+            return "-10675199.02:48:05.4775808";
+        if (ticks_ == LLONG_MAX)
+            return "10675199.02:48:05.4775807";
+        int64_t r = ticks_;
+        std::string sign;
+        if (r < 0)
+        {
+            sign = "-";
+            r = -r;
+        }
+        int64_t d = r / detail::TicksPerDay;
+        r %= detail::TicksPerDay;
+        int h = (int)(r / detail::TicksPerHour);
+        r %= detail::TicksPerHour;
+        int m = (int)(r / detail::TicksPerMinute);
+        r %= detail::TicksPerMinute;
+        int s = (int)(r / detail::TicksPerSecond);
+        r %= detail::TicksPerSecond;
+        int ms = (int)(r / detail::TicksPerMillisecond);
+        char buf[64];
+        if (ms > 0)
+            snprintf(buf, sizeof(buf), "%s%lld.%02d:%02d:%02d.%03d", sign.c_str(), (long long)d, h, m, s, ms);
+        else
+            snprintf(buf, sizeof(buf), "%s%lld.%02d:%02d:%02d", sign.c_str(), (long long)d, h, m, s);
+        return std::string(buf);
+    }
+
+    /** @brief 两个 TimeSpan 相加。 */
+    TimeSpan operator+(const TimeSpan &o) const { return Add(o); }
+    /** @brief 两个 TimeSpan 相减。 */
+    TimeSpan operator-(const TimeSpan &o) const { return Subtract(o); }
+    /** @brief 返回相反数。 */
+    TimeSpan operator-() const { return Negate(); }
+    /** @brief 返回自身（一元正号）。 */
+    TimeSpan operator+() const { return *this; }
+    /** @brief 添加 TimeSpan 到当前实例。 */
+    TimeSpan &operator+=(const TimeSpan &o)
+    {
+        ticks_ += o.ticks_;
+        return *this;
+    }
+    /** @brief 从当前实例减去 TimeSpan。 */
+    TimeSpan &operator-=(const TimeSpan &o)
+    {
+        ticks_ -= o.ticks_;
+        return *this;
+    }
+
+    /** @brief 判断两个 TimeSpan 是否相等。 */
+    bool operator==(const TimeSpan &o) const { return ticks_ == o.ticks_; }
+    /** @brief 判断两个 TimeSpan 是否不等。 */
+    bool operator!=(const TimeSpan &o) const { return ticks_ != o.ticks_; }
+    /** @brief 判断当前 TimeSpan 是否小于另一个。 */
+    bool operator<(const TimeSpan &o) const { return ticks_ < o.ticks_; }
+    /** @brief 判断当前 TimeSpan 是否小于等于另一个。 */
+    bool operator<=(const TimeSpan &o) const { return ticks_ <= o.ticks_; }
+    /** @brief 判断当前 TimeSpan 是否大于另一个。 */
+    bool operator>(const TimeSpan &o) const { return ticks_ > o.ticks_; }
+    /** @brief 判断当前 TimeSpan 是否大于等于另一个。 */
+    bool operator>=(const TimeSpan &o) const { return ticks_ >= o.ticks_; }
+
+    /** @brief 将 TimeSpan 输出到流。 */
+    friend std::ostream &operator<<(std::ostream &os, const TimeSpan &ts)
+    {
+        os << ts.ToString();
+        return os;
+    }
+};
+
+/**
+ * @brief 模仿 System.DateTime 的日期时间类。
+ *
+ * 使用 int64_t ticks（100 纳秒间隔，自公元 1 年 1 月 1 日午夜起）作为内部存储，
+ * 提供与 C# DateTime 近乎一致的接口和语义。
+ *
+ * 所有 C# 属性均映射为 GetXxx() 方法（因为 C++ 不支持属性语法）。
+ *
+ * 支持所有标准日期时间操作：
+ * - 构造、格式化、解析
+ * - 日期算术（AddDays/AddMonths/AddYears 等）
+ * - 时间间隔运算（配合 TimeSpan）
+ * - UTC / 本地时间转换
+ * - 比较运算符
+ *
+ * 使用示例:
+ * @code{.cpp}
+ *   DateTime dt(2024, 6, 7, 14, 30, 0);
+ *   std::cout << dt.ToString("yyyy-MM-dd HH:mm:ss"); // "2024-06-07 14:30:00"
+ *   DateTime now = DateTime::Now();
+ *   DateTime tomorrow = now.AddDays(1);
+ * @endcode
+ */
+class DateTime
+{
+private:
+    int64_t ticks_; // 100-nanosecond intervals since 1/1/0001
+    DateTimeKind kind_;
+
+    //DateTime ticks to Unix time_t
+    std::time_t ticks_to_time_t(int64_t t) const
+    {
+        int64_t unix_ticks = t - detail::UnixEpochTicks;
+        if (unix_ticks < 0)
+            return 0;
+        return static_cast<std::time_t>(unix_ticks / detail::TicksPerSecond);
+    }
+
+    int64_t time_t_to_ticks(std::time_t tt) const
+    {
+        return static_cast<int64_t>(tt) * detail::TicksPerSecond + detail::UnixEpochTicks;
+    }
+
+    int64_t time_of_day_ticks() const { return ticks_ % detail::TicksPerDay; }
+
+    // Fallback: compute tm directly from ticks (handles any date 1/1/0001 - 12/31/9999)
+    std::tm ticks_to_tm(int64_t t) const
+    {
+        std::tm tm = {};
+        int y, m, d;
+        detail::ticks_to_date(t, y, m, d);
+        tm.tm_year = y - 1900;
+        tm.tm_mon = m - 1;
+        tm.tm_mday = d;
+        int64_t tod = t % detail::TicksPerDay;
+        tm.tm_hour = (int)(tod / detail::TicksPerHour);
+        tod %= detail::TicksPerHour;
+        tm.tm_min = (int)(tod / detail::TicksPerMinute);
+        tod %= detail::TicksPerMinute;
+        tm.tm_sec = (int)(tod / detail::TicksPerSecond);
+        return tm;
+    }
+
+    std::tm get_tm_local() const
+    {
+        if (ticks_ < detail::UnixEpochTicks)
+        {
+            return ticks_to_tm(ticks_);
+        }
+        std::time_t tt = ticks_to_time_t(ticks_);
         std::tm tm;
 #ifdef _WIN32
-        if (localtime_s(&tm, &tt) != 0) {
-            throw std::runtime_error("Failed to convert to local time");
+        if (localtime_s(&tm, &tt) != 0)
+        {
+            return ticks_to_tm(ticks_);
         }
 #else
-        if (localtime_r(&tt, &tm) == nullptr) {
-            throw std::runtime_error("Failed to convert to local time");
+        if (localtime_r(&tt, &tm) == nullptr)
+        {
+            return ticks_to_tm(ticks_);
         }
 #endif
         return tm;
     }
-    
-    std::tm get_tm_utc() const {
-        std::time_t tt = std::chrono::system_clock::to_time_t(time_point_);
+
+    std::tm get_tm_utc() const
+    {
+        if (ticks_ < detail::UnixEpochTicks)
+        {
+            return ticks_to_tm(ticks_);
+        }
+        std::time_t tt = ticks_to_time_t(ticks_);
         std::tm tm;
 #ifdef _WIN32
-        if (gmtime_s(&tm, &tt) != 0) {
-            throw std::runtime_error("Failed to convert to UTC time");
+        if (gmtime_s(&tm, &tt) != 0)
+        {
+            return ticks_to_tm(ticks_);
         }
 #else
-        if (gmtime_r(&tt, &tm) == nullptr) {
-            throw std::runtime_error("Failed to convert to UTC time");
+        if (gmtime_r(&tt, &tm) == nullptr)
+        {
+            return ticks_to_tm(ticks_);
         }
 #endif
         return tm;
     }
-    
-    static bool try_parse_csharp_format(const std::string& str, const std::string& format, 
-                                        int& year, int& month, int& day, 
-                                        int& hour, int& minute, int& second, int& millisecond,
-                                        bool& is_pm) {
-        size_t str_idx = 0;
-        size_t fmt_idx = 0;
+
+    std::tm get_tm() const
+    {
+        return (kind_ == DateTimeKind::Utc) ? get_tm_utc() : get_tm_local();
+    }
+
+    static bool try_parse_csharp_format(const std::string &str, const std::string &format,
+                                        int &year, int &month, int &day,
+                                        int &hour, int &minute, int &second, int &millisecond,
+                                        bool &is_pm)
+    {
+        size_t str_idx = 0, fmt_idx = 0;
         is_pm = false;
-        
-        while (fmt_idx < format.length() && str_idx < str.length()) {
-            char fmt_char = format[fmt_idx];
-            
-            if (fmt_char == '\'') {
+        while (fmt_idx < format.length() && str_idx < str.length())
+        {
+            char fc = format[fmt_idx];
+            if (fc == '\'')
+            {
                 fmt_idx++;
-                size_t end_quote = format.find('\'', fmt_idx);
-                if (end_quote == std::string::npos) {
+                size_t eq = format.find('\'', fmt_idx);
+                if (eq == std::string::npos)
                     return false;
-                }
-                
-                for (size_t i = fmt_idx; i < end_quote; i++) {
-                    if (str_idx >= str.length() || str[str_idx] != format[i]) {
+                while (fmt_idx < eq)
+                {
+                    if (str_idx >= str.size() || str[str_idx] != format[fmt_idx])
                         return false;
-                    }
                     str_idx++;
+                    fmt_idx++;
                 }
-                fmt_idx = end_quote + 1;
+                fmt_idx = eq + 1;
                 continue;
             }
-            
-            if (fmt_char == 'y' || fmt_char == 'M' || fmt_char == 'd' || 
-                fmt_char == 'H' || fmt_char == 'h' || fmt_char == 'm' ||
-                fmt_char == 's' || fmt_char == 'f' || fmt_char == 't') {
-                
-                size_t count = 1;
-                while (fmt_idx + count < format.length() && format[fmt_idx + count] == fmt_char) {
-                    count++;
-                }
-                
-                if (str_idx >= str.length()) {
+            if (fc == 'y' || fc == 'M' || fc == 'd' || fc == 'H' || fc == 'h' ||
+                fc == 'm' || fc == 's' || fc == 'f' || fc == 't')
+            {
+                size_t cnt = 1;
+                while (fmt_idx + cnt < format.size() && format[fmt_idx + cnt] == fc)
+                    cnt++;
+                if (str_idx >= str.size())
                     return false;
-                }
-                // 't' (AM/PM) reads letters, not digits
-                if (fmt_char != 't' && !std::isdigit(static_cast<unsigned char>(str[str_idx]))) {
+                if (fc != 't' && !std::isdigit((unsigned char)str[str_idx]))
                     return false;
-                }
-                
-                int value = 0;
-                size_t digits = 0;
-                
-                size_t max_digits = (fmt_char == 'f') ? 7 : count;
-                
-                while (str_idx < str.length() && std::isdigit(str[str_idx]) && digits < max_digits) {
-                    value = value * 10 + (str[str_idx] - '0');
+                int val = 0;
+                size_t dig = 0;
+                size_t maxd = (fc == 'f') ? 7 : cnt;
+                while (str_idx < str.size() && std::isdigit((unsigned char)str[str_idx]) && dig < maxd)
+                {
+                    val = val * 10 + (str[str_idx] - '0');
                     str_idx++;
-                    digits++;
+                    dig++;
                 }
-                
-                switch (fmt_char) {
-                    case 'y':
-                        if (count == 2) {
-                            year = (value < 30) ? 2000 + value : 1900 + value;
-                        } else if (count >= 4) {
-                            if (digits == 4) {
-                                year = value;
-                            } else {
-                                while (digits < 4) {
-                                    value *= 10;
-                                    digits++;
-                                }
-                                year = value;
-                            }
+                switch (fc)
+                {
+                case 'y':
+                    if (cnt == 2)
+                        year = (val < 30) ? 2000 + val : 1900 + val;
+                    else if (cnt >= 4)
+                    {
+                        while (dig < 4)
+                        {
+                            val *= 10;
+                            dig++;
                         }
-                        break;
-                        
-                    case 'M':
-                        month = value;
-                        if (month < 1 || month > 12) return false;
-                        break;
-                        
-                    case 'd':
-                        day = value;
-                        if (day < 1 || day > 31) return false;
-                        break;
-                        
-                    case 'H':
-                        hour = value;
-                        if (hour < 0 || hour > 23) return false;
-                        break;
-                        
-                    case 'h':
-                        hour = value;
-                        if (hour < 1 || hour > 12) return false;
-                        break;
-                        
-                    case 'm':
-                        minute = value;
-                        if (minute < 0 || minute > 59) return false;
-                        break;
-                        
-                    case 's':
-                        second = value;
-                        if (second < 0 || second > 59) return false;
-                        break;
-                        
-                    case 'f':
-                        if (count <= 3) {
-                            for (size_t i = digits; i < 3; i++) {
-                                value *= 10;
-                            }
-                            millisecond = value;
-                        } else if (count <= 6) {
-                            for (size_t i = digits; i < 6; i++) {
-                                value *= 10;
-                            }
-                            millisecond = value / 1000;
-                        } else {
-                            for (size_t i = digits; i < 7; i++) {
-                                value *= 10;
-                            }
-                            millisecond = value / 10000;
+                        year = val;
+                    }
+                    break;
+                case 'M':
+                    month = val;
+                    if (month < 1 || month > 12)
+                        return false;
+                    break;
+                case 'd':
+                    day = val;
+                    if (day < 1 || day > 31)
+                        return false;
+                    break;
+                case 'H':
+                    hour = val;
+                    if (hour < 0 || hour > 23)
+                        return false;
+                    break;
+                case 'h':
+                    hour = val;
+                    if (hour < 1 || hour > 12)
+                        return false;
+                    break;
+                case 'm':
+                    minute = val;
+                    if (minute < 0 || minute > 59)
+                        return false;
+                    break;
+                case 's':
+                    second = val;
+                    if (second < 0 || second > 59)
+                        return false;
+                    break;
+                case 'f':
+                    if (cnt <= 3)
+                    {
+                        while (dig < 3)
+                        {
+                            val *= 10;
+                            dig++;
                         }
-                        break;
-                        
-                    case 't':
-                        if (count == 1) {
-                            if (str_idx < str.length()) {
-                                char ampm = std::toupper(str[str_idx]);
-                                if (ampm == 'A') {
-                                    is_pm = false;
-                                } else if (ampm == 'P') {
-                                    is_pm = true;
-                                } else {
-                                    return false;
-                                }
-                                str_idx++;
-                            }
-                        } else if (count == 2) {
-                            if (str_idx + 1 < str.length()) {
-                                std::string ampm = str.substr(str_idx, 2);
-                                std::transform(ampm.begin(), ampm.end(), ampm.begin(), ::toupper);
-                                if (ampm == "AM") {
-                                    is_pm = false;
-                                } else if (ampm == "PM") {
-                                    is_pm = true;
-                                } else {
-                                    return false;
-                                }
-                                str_idx += 2;
-                            }
+                        millisecond = val;
+                    }
+                    else if (cnt <= 6)
+                    {
+                        while (dig < 6)
+                        {
+                            val *= 10;
+                            dig++;
                         }
-                        break;
+                        millisecond = val / 1000;
+                    }
+                    else
+                    {
+                        while (dig < 7)
+                        {
+                            val *= 10;
+                            dig++;
+                        }
+                        millisecond = val / 10000;
+                    }
+                    break;
+                case 't':
+                    if (cnt == 1 && str_idx < str.size())
+                    {
+                        char c = (char)std::toupper((unsigned char)str[str_idx]);
+                        if (c == 'A')
+                            is_pm = false;
+                        else if (c == 'P')
+                            is_pm = true;
+                        else
+                            return false;
+                        str_idx++;
+                    }
+                    else if (cnt >= 2 && str_idx + 1 < str.size())
+                    {
+                        std::string ap = str.substr(str_idx, 2);
+                        std::transform(ap.begin(), ap.end(), ap.begin(),
+                                       [](unsigned char c)
+                                       { return (char)std::toupper(c); });
+                        if (ap == "AM")
+                            is_pm = false;
+                        else if (ap == "PM")
+                            is_pm = true;
+                        else
+                            return false;
+                        str_idx += 2;
+                    }
+                    break;
                 }
-                
-                fmt_idx += count;
-            } else {
-                
-                if (str_idx >= str.length() || str[str_idx] != fmt_char) {
+                fmt_idx += cnt;
+            }
+            else
+            {
+                if (str_idx >= str.size() || str[str_idx] != fc)
                     return false;
-                }
                 str_idx++;
                 fmt_idx++;
             }
         }
-        
-        if (str_idx < str.length() || fmt_idx < format.length()) {
+        if (str_idx < str.size() || fmt_idx < format.size())
             return false;
+        if (format.find('h') != std::string::npos && format.find('t') != std::string::npos)
+        {
+            if (is_pm && hour < 12)
+                hour += 12;
+            else if (!is_pm && hour == 12)
+                hour = 0;
         }
-        
-        if (format.find('h') != std::string::npos) {
-            if (format.find('t') != std::string::npos) {
-                if (is_pm && hour < 12) {
-                    hour += 12;
-                } else if (!is_pm && hour == 12) {
-                    hour = 0;
-                }
-            }
-        }
-        
         return true;
-    }
-    
-    static std::string csharp_to_strftime_format(const std::string& csharp_format) {
-        std::string result;
-        size_t i = 0;
-        
-        while (i < csharp_format.length()) {
-            char c = csharp_format[i];
-            
-            if (c == '\'') {
-                i++;
-                size_t end_quote = csharp_format.find('\'', i);
-                if (end_quote == std::string::npos) {
-                    throw std::runtime_error("Unclosed quote in format string");
-                }
-                result += csharp_format.substr(i, end_quote - i);
-                i = end_quote + 1;
-                continue;
-            }
-            
-            if (c == 'y' || c == 'M' || c == 'd' || c == 'H' || 
-                c == 'h' || c == 'm' || c == 's' || c == 't') {
-                
-                size_t count = 1;
-                while (i + count < csharp_format.length() && csharp_format[i + count] == c) {
-                    count++;
-                }
-                
-                switch (c) {
-                    case 'y':
-                        if (count >= 4) {
-                            result += "%Y";
-                        } else {
-                            result += "%y";
-                        }
-                        break;
-                    case 'M':
-                        if (count == 1) {
-                            result += "%m";
-                        } else {
-                            result += "%m";
-                        }
-                        break;
-                    case 'd':
-                        if (count == 1) {
-                            result += "%d";
-                        } else if (count == 2) {
-                            result += "%d";
-                        } else if (count == 3) {
-                            result += "%a";
-                        } else if (count >= 4) {
-                            result += "%A";
-                        }
-                        break;
-                    case 'H':
-                        result += "%H";
-                        break;
-                    case 'h':
-                        result += "%I";
-                        break;
-                    case 'm':
-                        result += "%M";
-                        break;
-                    case 's':
-                        result += "%S";
-                        break;
-                    case 't':
-                        if (count == 1) {
-                            result += "%p"; //因为strftime的限制，所以只能使用tt格式的上下午
-                        } else {
-                            result += "%p";
-                        }
-                        break;
-                }
-                
-                i += count;
-            } else {
-                result.push_back(c);
-                i++;
-            }
-        }
-        
-        return result;
     }
 
 public:
-    
-    DateTime() : time_point_(std::chrono::system_clock::now()) {}
-    
-    explicit DateTime(std::time_t t) : time_point_(std::chrono::system_clock::from_time_t(t)) {}
-    
-    DateTime(int year, int month, int day, int hour = 0, int minute = 0, int second = 0, int millisecond = 0) {
-        if (month < 1 || month > 12 || day < 1 || day > 31 || 
-            hour < 0 || hour > 23 || minute < 0 || minute > 59 || 
-            second < 0 || second > 59 || millisecond < 0 || millisecond > 999) {
-            throw std::runtime_error("Invalid datetime parameters");
-        }
-        
-        std::tm tm = {};
-        tm.tm_year = year - 1900;
-        tm.tm_mon = month - 1;
-        tm.tm_mday = day;
-        tm.tm_hour = hour;
-        tm.tm_min = minute;
-        tm.tm_sec = second;
-        tm.tm_isdst = -1;
-        
-        time_point_ = tm_to_time_point(tm);
-        if (millisecond > 0) {
-            time_point_ += std::chrono::milliseconds(millisecond);
-        }
+
+    /**
+     * @brief 默认构造函数。初始化为 DateTime::MinValue（0001-01-01），与 C# 一致。
+     */
+    DateTime() : ticks_(0), kind_(DateTimeKind::Unspecified) {}
+
+    /**
+     * @brief 从 std::time_t（Unix 时间戳）构造 DateTime。
+     * @param t Unix 时间戳（自 1970-01-01 以来的秒数）
+     * @note Kind 自动设为 Local。
+     */
+    explicit DateTime(std::time_t t)
+        : ticks_(time_t_to_ticks(t)), kind_(DateTimeKind::Local) {}
+
+    /**
+     * @brief 从指定的 ticks 和 DateTimeKind 构造 DateTime。
+     * @param ticks 自 0001-01-01 以来的 100 纳秒间隔数
+     * @param kind DateTimeKind（默认为 Unspecified）
+     * @throw std::runtime_error 如果 ticks 超出有效范围 [MinTicks, MaxTicks]
+     */
+    explicit DateTime(int64_t ticks, DateTimeKind kind = DateTimeKind::Unspecified)
+        : ticks_(ticks), kind_(kind)
+    {
+        if (ticks_ < detail::MinTicks || ticks_ > detail::MaxTicks)
+            throw std::runtime_error("Ticks out of valid DateTime range");
     }
-    
-    static DateTime Now() {
-        return DateTime();
+
+    /**
+     * @brief 从各时间分量构造 DateTime。
+     * @param year 年（1~9999）
+     * @param month 月（1~12）
+     * @param day 日（1~31，会校验月份最大天数）
+     * @param hour 时（0~23，默认 0）
+     * @param minute 分（0~59，默认 0）
+     * @param second 秒（0~59，默认 0）
+     * @param millisecond 毫秒（0~999，默认 0）
+     * @param kind DateTimeKind（默认为 Unspecified）
+     * @throw std::runtime_error 如果任何参数超出有效范围
+     */
+    DateTime(int year, int month, int day,
+             int hour = 0, int minute = 0, int second = 0, int millisecond = 0,
+             DateTimeKind kind = DateTimeKind::Unspecified)
+    {
+        if (millisecond < 0 || millisecond > 999)
+            throw std::runtime_error("Invalid datetime parameters: millisecond out of range");
+        int64_t date_part = detail::date_to_ticks(year, month, day);
+        int64_t time_part =
+            (int64_t)hour * detail::TicksPerHour +
+            (int64_t)minute * detail::TicksPerMinute +
+            (int64_t)second * detail::TicksPerSecond +
+            (int64_t)millisecond * detail::TicksPerMillisecond;
+        if (time_part < 0 || time_part >= detail::TicksPerDay)
+            throw std::runtime_error("Invalid datetime parameters: time out of range");
+        ticks_ = date_part + time_part;
+        kind_ = kind;
+        if (ticks_ < detail::MinTicks || ticks_ > detail::MaxTicks)
+            throw std::runtime_error("Invalid datetime parameters: result out of range");
     }
-    
-    static DateTime UtcNow() {
+
+    /**
+     * @brief 获取当前本地日期和时间（静态属性）。
+     * @return 表示当前本地时间的 DateTime，Kind=Local。
+     */
+    static DateTime Now()
+    {
         auto now = std::chrono::system_clock::now();
-        return DateTime(std::chrono::system_clock::to_time_t(now));
+        auto tt = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        int64_t ticks = (int64_t)tt * detail::TicksPerSecond + detail::UnixEpochTicks + (ms % 1000) * detail::TicksPerMillisecond;
+        return DateTime(ticks, DateTimeKind::Local);
     }
-    
-    static DateTime Today() {
+
+    /**
+     * @brief 获取当前 UTC 日期和时间（静态属性）。
+     * @return 表示当前 UTC 时间的 DateTime，Kind=Utc。
+     */
+    static DateTime UtcNow()
+    {
         auto now = std::chrono::system_clock::now();
-        std::time_t tt = std::chrono::system_clock::to_time_t(now);
-        std::tm tm;
-#ifdef _WIN32
-        if (localtime_s(&tm, &tt) != 0) {
-            throw std::runtime_error("Failed to get local time");
-        }
-#else
-        if (localtime_r(&tt, &tm) == nullptr) {
-            throw std::runtime_error("Failed to get local time");
-        }
-#endif
-        tm.tm_hour = 0;
-        tm.tm_min = 0;
-        tm.tm_sec = 0;
-        return DateTime(std::mktime(&tm));
+        auto tt = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        int64_t ticks = (int64_t)tt * detail::TicksPerSecond + detail::UnixEpochTicks + (ms % 1000) * detail::TicksPerMillisecond;
+        return DateTime(ticks, DateTimeKind::Utc);
     }
 
-    //C++没有属性，Get函数凑合凑合吧
-    
-    int GetYear() const { return get_tm().tm_year + 1900; }
-    int GetMonth() const { return get_tm().tm_mon + 1; }
-    int GetDay() const { return get_tm().tm_mday; }
-    int GetHour() const { return get_tm().tm_hour; }
-    int GetMinute() const { return get_tm().tm_min; }
-    int GetSecond() const { return get_tm().tm_sec; }
-    
-    int GetMillisecond() const {
-        auto duration = time_point_.time_since_epoch();
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
-        auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration - seconds);
-        return milliseconds.count();
+    /**
+     * @brief 获取当前日期（时间部分为 00:00:00）。
+     * @return 表示当天日期的 DateTime，Kind=Local，时分秒为 0。
+     */
+    static DateTime Today()
+    {
+        DateTime n = Now();
+        return DateTime(n.ticks_ - n.time_of_day_ticks(), DateTimeKind::Local);
     }
 
-    int GetDayOfWeek() const {
-        std::tm tm = get_tm();
-        return tm.tm_wday;
+    /**
+     * @brief 获取 DateTime 的最小可能值（0001-01-01）。
+     */
+    static DateTime MinValue() { return DateTime((int64_t)0, DateTimeKind::Unspecified); }
+    /**
+     * @brief 获取 DateTime 的最大可能值（9999-12-31 23:59:59.9999999）。
+     */
+    static DateTime MaxValue() { return DateTime(detail::MaxTicks, DateTimeKind::Unspecified); }
+
+    /**
+     * @brief 获取此 DateTime 的日期部分（时间部分设为 00:00:00）。
+     * @return 一个新的 DateTime，其日期与当前实例相同，时间为午夜。
+     */
+    DateTime GetDate() const { return DateTime(ticks_ - time_of_day_ticks(), kind_); }
+    /**
+     * @brief 获取此 DateTime 当天的时间部分。
+     * @return 一个 TimeSpan，表示自午夜以来的时间间隔。
+     */
+    TimeSpan GetTimeOfDay() const { return TimeSpan(time_of_day_ticks()); }
+    /** @brief 获取此 DateTime 的刻度数（自 0001-01-01 以来的 100 纳秒间隔数）。 */
+    int64_t GetTicks() const { return ticks_; }
+    /** @brief 获取此 DateTime 的 DateTimeKind（Unspecified / Utc / Local）。 */
+    DateTimeKind GetKind() const { return kind_; }
+
+    /** @brief 获取年份分量（1~9999）。 */
+    int GetYear() const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        return y;
     }
-    
-    int GetDayOfYear() const {
-        std::tm tm = get_tm();
-        return tm.tm_yday + 1;
+    /** @brief 获取月份分量（1~12）。 */
+    int GetMonth() const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        return m;
+    }
+    /** @brief 获取日期分量（1~31）。 */
+    int GetDay() const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        return d;
+    }
+    /** @brief 获取小时分量（0~23）。 */
+    int GetHour() const { return (int)(time_of_day_ticks() / detail::TicksPerHour); }
+    /** @brief 获取分钟分量（0~59）。 */
+    int GetMinute() const
+    {
+        int64_t t = time_of_day_ticks() % detail::TicksPerHour;
+        return (int)(t / detail::TicksPerMinute);
+    }
+    /** @brief 获取秒钟分量（0~59）。 */
+    int GetSecond() const
+    {
+        int64_t t = time_of_day_ticks() % detail::TicksPerMinute;
+        return (int)(t / detail::TicksPerSecond);
+    }
+    /** @brief 获取毫秒分量（0~999）。 */
+    int GetMillisecond() const
+    {
+        int64_t t = time_of_day_ticks() % detail::TicksPerSecond;
+        return (int)(t / detail::TicksPerMillisecond);
     }
 
-    int GetUtcYear() const { return get_tm_utc().tm_year + 1900; }
-    int GetUtcMonth() const { return get_tm_utc().tm_mon + 1; }
-    int GetUtcDay() const { return get_tm_utc().tm_mday; }
-    int GetUtcHour() const { return get_tm_utc().tm_hour; }
-    int GetUtcMinute() const { return get_tm_utc().tm_min; }
-    int GetUtcSecond() const { return get_tm_utc().tm_sec; }
-    
-    std::time_t ToTime_t() const {
-        return std::chrono::system_clock::to_time_t(time_point_);
+    /**
+     * @brief 获取此 DateTime 表示的星期几。
+     * @return 0=Sunday, 1=Monday, ..., 6=Saturday（与 C# DayOfWeek 枚举一致）
+     */
+    int GetDayOfWeek() const
+    {
+        // 1/1/0001 = Monday = 1, DayOfWeek: Sunday=0
+        int64_t days = ticks_ / detail::TicksPerDay;
+        return (int)((days + 1) % 7);
     }
-    
-    // Use C#-style format strings for date/time formatting
-    std::string ToString(const std::string& format = "yyyy-MM-dd HH:mm:ss") const {
-        if (format.empty()) {
+
+    /**
+     * @brief 获取此 DateTime 在一年中的第几天。
+     * @return 1 到 366 之间的整数（1 月 1 日为 1）
+     */
+    int GetDayOfYear() const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        for (int i = 1; i < m; i++)
+            d += detail::days_in_month(y, i);
+        return d;
+    }
+
+    /**
+     * @brief 转换为 std::time_t（Unix 时间戳）。
+     * @return 自 1970-01-01 00:00:00 UTC 以来的秒数。
+     * @note 对于 1970 年之前的日期返回 0。
+     */
+    std::time_t ToTime_t() const { return ticks_to_time_t(ticks_); }
+
+    /**
+     * @brief 使用指定的格式将当前 DateTime 转换为字符串。
+     *
+     * 支持的格式说明符（与 C# 一致）：
+     *
+     * | 说明符 | 含义           | 示例              |
+     * |--------|----------------|-------------------|
+     * | y      | 短年份（不补零）| 24                |
+     * | yy     | 短年份（补零）  | 24                |
+     * | yyyy   | 完整年份        | 2024              |
+     * | M      | 数字月（不补零）| 6                 |
+     * | MM     | 数字月（补零）  | 06                |
+     * | MMM    | 缩写月份名     | Jun               |
+     * | MMMM   | 完整月份名     | June              |
+     * | d      | 日（不补零）    | 7                 |
+     * | dd     | 日（补零）      | 07                |
+     * | ddd    | 缩写星期名     | Fri               |
+     * | dddd   | 完整星期名     | Friday            |
+     * | H      | 24小时（不补零）| 14                |
+     * | HH     | 24小时（补零）  | 14                |
+     * | h      | 12小时（不补零）| 2                 |
+     * | hh     | 12小时（补零）  | 02                |
+     * | m      | 分钟（不补零）  | 5                 |
+     * | mm     | 分钟（补零）    | 05                |
+     * | s      | 秒（不补零）    | 3                 |
+     * | ss     | 秒（补零）      | 03                |
+     * | f/ff/fff | 毫秒        | 7 / 78 / 789      |
+     * | t      | AM/PM 首字符   | A/P  (注1)        |
+     * | tt     | AM/PM 完整     | AM/PM             |
+     * | 'text' | 转义文本       | '年' → 年         |
+     *
+     * 注1: 由于 strftime 限制，单个 't' 与 'tt' 行为相同（显示完整 AM/PM）。
+     *
+     * 使用示例:
+     * @code{.cpp}
+     *   DateTime dt(2024, 6, 7, 14, 5, 3, 789);
+     *   dt.ToString("yyyy-MM-dd HH:mm:ss");    // "2024-06-07 14:05:03"
+     *   dt.ToString("hh:mm tt");               // "02:05 PM"
+     *   dt.ToString("dddd, MMMM d, yyyy");     // "Friday, June 7, 2024"
+     *   dt.ToString("yyyy'年'MM'月'dd'日'");   // "2024年06月07日"
+     *   dt.ToString("yyyy-MM-dd HH:mm:ss.fff"); // "2024-06-07 14:05:03.789"
+     * @endcode
+     *
+     * @param format C# 风格的格式字符串（默认为 "yyyy-MM-dd HH:mm:ss"）
+     * @return 格式化的日期时间字符串
+     * @throw std::runtime_error 如果格式字符串包含未闭合的引号
+     */
+    std::string ToString(const std::string &format = "yyyy-MM-dd HH:mm:ss") const
+    {
+        if (format.empty())
             return ToString("yyyy-MM-dd HH:mm:ss");
-        }
-        
-        try {
-            std::time_t tt = std::chrono::system_clock::to_time_t(time_point_);
-            std::tm tm;
-#ifdef _WIN32
-            if (localtime_s(&tm, &tt) != 0) {
-                throw std::runtime_error("Failed to convert to local time");
-            }
-#else
-            if (localtime_r(&tt, &tm) == nullptr) {
-                throw std::runtime_error("Failed to convert to local time");
-            }
-#endif
-            
+        try
+        {
+            std::tm tm = get_tm();
             std::string result;
-            size_t i = 0;
-            
-            while (i < format.length()) {
+            for (size_t i = 0; i < format.size();)
+            {
                 char c = format[i];
-                
-                if (c == '\'') {
-                    // Literal text between quotes — append directly (avoids strftime UTF-8 issues on Windows)
+                if (c == '\'')
+                {
                     i++;
-                    size_t end_quote = format.find('\'', i);
-                    if (end_quote == std::string::npos) {
-                        throw std::runtime_error("Unclosed quote in format string");
+                    size_t eq = format.find('\'', i);
+                    if (eq == std::string::npos)
+                        throw std::runtime_error("Unclosed quote");
+                    result += format.substr(i, eq - i);
+                    i = eq + 1;
+                }
+                else if (c == 'y' || c == 'M' || c == 'd' || c == 'H' || c == 'h' || c == 'm' || c == 's' || c == 't')
+                {
+                    size_t cnt = 1;
+                    while (i + cnt < format.size() && format[i + cnt] == c)
+                        cnt++;
+                    const char *fmt = "";
+                    switch (c)
+                    {
+                    case 'y':
+                        fmt = (cnt >= 4) ? "%Y" : "%y";
+                        break;
+                    case 'M':
+                        fmt = (cnt >= 4) ? "%B" : (cnt == 3 ? "%b" : "%m");
+                        break;
+                    case 'd':
+                        fmt = (cnt >= 4) ? "%A" : (cnt == 3 ? "%a" : "%d");
+                        break;
+                    case 'H':
+                        fmt = "%H";
+                        break;
+                    case 'h':
+                        fmt = "%I";
+                        break;
+                    case 'm':
+                        fmt = "%M";
+                        break;
+                    case 's':
+                        fmt = "%S";
+                        break;
+                    case 't':
+                        fmt = "%p";
+                        break;
                     }
-                    result += format.substr(i, end_quote - i);
-                    i = end_quote + 1;
-                } else if (c == 'y' || c == 'M' || c == 'd' || c == 'H' || 
-                           c == 'h' || c == 'm' || c == 's' || c == 't') {
-                    // Format specifier — use strftime for a single segment
-                    size_t count = 1;
-                    while (i + count < format.length() && format[i + count] == c) {
-                        count++;
-                    }
-                    
-                    std::string strf;
-                    switch (c) {
-                        case 'y': strf = (count >= 4) ? "%Y" : "%y"; break;
-                        case 'M':
-                            if (count >= 4)      strf = "%B";  // full month name
-                            else if (count == 3) strf = "%b";  // abbreviated month name
-                            else                 strf = "%m";
-                            break;
-                        case 'd':
-                            if (count >= 4)      strf = "%A";
-                            else if (count == 3) strf = "%a";
-                            else                 strf = "%d";
-                            break;
-                        case 'H': strf = "%H"; break;
-                        case 'h': strf = "%I"; break;
-                        case 'm': strf = "%M"; break;
-                        case 's': strf = "%S"; break;
-                        case 't': strf = "%p"; break;
-                    }
-                    
-                    char buf[64];
-                    if (std::strftime(buf, sizeof(buf), strf.c_str(), &tm) > 0) {
-                        result += buf;
-                    }
-                    i += count;
-                } else if (c == 'f') {
-                    // Fractional seconds (milliseconds)
-                    size_t count = 1;
-                    while (i + count < format.length() && format[i + count] == 'f') {
-                        count++;
-                    }
-                    
+                    char buf[64] = {};
+                    std::strftime(buf, sizeof(buf), fmt, &tm);
+                    result += buf;
+                    i += cnt;
+                }
+                else if (c == 'f')
+                {
+                    size_t cnt = 1;
+                    while (i + cnt < format.size() && format[i + cnt] == 'f')
+                        cnt++;
                     int ms = GetMillisecond();
-                    char ms_buf[16] = {};
-                    
-                    if (count <= 3) {
-                        if (count == 1) {
-                            snprintf(ms_buf, sizeof(ms_buf), "%d", ms / 100);
-                        } else if (count == 2) {
-                            snprintf(ms_buf, sizeof(ms_buf), "%02d", ms / 10);
-                        } else {
-                            snprintf(ms_buf, sizeof(ms_buf), "%03d", ms);
-                        }
-                        result += ms_buf;
-                    } else if (count <= 6) {
-                        snprintf(ms_buf, sizeof(ms_buf), "%06d", ms * 1000);
-                        result += std::string(ms_buf).substr(0, count);
-                    } else {
-                        snprintf(ms_buf, sizeof(ms_buf), "%07d", ms * 10000);
-                        result += std::string(ms_buf).substr(0, count);
+                    char buf[16] = {};
+                    if (cnt <= 3)
+                    {
+                        if (cnt == 1)
+                            snprintf(buf, sizeof(buf), "%d", ms / 100);
+                        else if (cnt == 2)
+                            snprintf(buf, sizeof(buf), "%02d", ms / 10);
+                        else
+                            snprintf(buf, sizeof(buf), "%03d", ms);
                     }
-                    i += count;
-                } else {
-                    // Regular literal character
+                    else if (cnt <= 6)
+                    {
+                        snprintf(buf, sizeof(buf), "%06d", ms * 1000);
+                        result += std::string(buf).substr(0, cnt);
+                        i += cnt;
+                        continue;
+                    }
+                    else
+                    {
+                        snprintf(buf, sizeof(buf), "%07d", ms * 10000);
+                        result += std::string(buf).substr(0, cnt);
+                        i += cnt;
+                        continue;
+                    }
+                    result += buf;
+                    i += cnt;
+                }
+                else
+                {
                     result += c;
                     i++;
                 }
             }
-            
             return result;
-        } catch (...) {
+        }
+        catch (...)
+        {
             throw;
         }
     }
-    
-    std::string ToShortDateString() const {
-        return ToString("yyyy-MM-dd");
-    }
-    
-    std::string ToLongDateString() const {
-        return ToString("dddd, MMMM d, yyyy");
-    }
-    
-    std::string ToShortTimeString() const {
-        return ToString("HH:mm");
-    }
-    
-    std::string ToLongTimeString() const {
-        return ToString("HH:mm:ss");
-    }
-    
-    //Parse with C# style DateTime stringify format
-    static DateTime Parse(const std::string& str, const std::string& format = "") {
-        if (format.empty()) {
-            
-            std::vector<std::string> common_formats = {
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd",
-                "MM/dd/yyyy HH:mm:ss",
-                "MM/dd/yyyy",
-                "dd/MM/yyyy HH:mm:ss",
-                "dd/MM/yyyy",
-                "yyyy/MM/dd HH:mm:ss",
-                "yyyy/MM/dd"
-            };
-            
-            for (const auto& fmt : common_formats) {
-                try {
-                    return Parse(str, fmt);
-                } catch (...) {
-                    // 继续尝试下一个格式
+
+    /** @brief 返回短日期字符串（格式: yyyy-MM-dd）。 */
+    std::string ToShortDateString() const { return ToString("yyyy-MM-dd"); }
+    /** @brief 返回长日期字符串（格式: dddd, MMMM d, yyyy，例如 "Friday, June 7, 2024"）。 */
+    std::string ToLongDateString() const { return ToString("dddd, MMMM d, yyyy"); }
+    /** @brief 返回短时间字符串（格式: HH:mm）。 */
+    std::string ToShortTimeString() const { return ToString("HH:mm"); }
+    /** @brief 返回长时间字符串（格式: HH:mm:ss）。 */
+    std::string ToLongTimeString() const { return ToString("HH:mm:ss"); }
+
+    /**
+     * @brief 将日期时间字符串解析为 DateTime，支持自动格式检测或指定格式。
+     *
+     * 自动检测的格式（当 format 为空时按顺序尝试）：
+     * - yyyy-MM-dd HH:mm:ss
+     * - yyyy-MM-dd
+     * - MM/dd/yyyy HH:mm:ss
+     * - MM/dd/yyyy
+     * - dd/MM/yyyy HH:mm:ss
+     * - dd/MM/yyyy
+     * - yyyy/MM/dd HH:mm:ss
+     * - yyyy/MM/dd
+     *
+     * 使用示例:
+     * @code{.cpp}
+     *   // 自动检测格式
+     *   DateTime dt1 = DateTime::Parse("2024-06-07 14:30:00");
+     *   DateTime dt2 = DateTime::Parse("06/07/2024");
+     *
+     *   // 指定格式
+     *   DateTime dt3 = DateTime::Parse("2024年06月07日", "yyyy'年'MM'月'dd'日'");
+     *   DateTime dt4 = DateTime::Parse("06/07/2024 02:30:00 PM", "MM/dd/yyyy hh:mm:ss tt");
+     * @endcode
+     *
+     * @param str 要解析的日期时间字符串
+     * @param format C# 风格格式字符串（为空时自动检测）
+     * @return 解析后的 DateTime
+     * @throw std::runtime_error 如果无法解析
+     */
+    static DateTime Parse(const std::string &str, const std::string &format = "")
+    {
+        if (format.empty())
+        {
+            static const char *fmts[] = {
+                "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd",
+                "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy",
+                "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy",
+                "yyyy/MM/dd HH:mm:ss", "yyyy/MM/dd"};
+            for (auto f : fmts)
+            {
+                try
+                {
+                    return Parse(str, f);
+                }
+                catch (...)
+                {
                 }
             }
-            
-            throw std::runtime_error("Unable to parse the datetime string:" + str);
+            throw std::runtime_error("Unable to parse the datetime string: " + str);
         }
-        
-        int year = 1900, month = 1, day = 1;
-        int hour = 0, minute = 0, second = 0, millisecond = 0;
+        int year = 1900, month = 1, day = 1, hour = 0, minute = 0, second = 0, ms = 0;
         bool is_pm = false;
-        
-        if (try_parse_csharp_format(str, format, year, month, day, hour, minute, second, millisecond, is_pm)) {
-            return DateTime(year, month, day, hour, minute, second, millisecond);
-        }
-        
-        throw std::runtime_error("Unable to parse the datetime \"" + str +"\" with format \"" + format + "\"");
+        if (try_parse_csharp_format(str, format, year, month, day, hour, minute, second, ms, is_pm))
+            return DateTime(year, month, day, hour, minute, second, ms);
+        throw std::runtime_error("Unable to parse \"" + str + "\" with format \"" + format + "\"");
     }
-    
-    //Parse with C# style DateTime stringify format
-    static bool TryParse(const std::string& str, DateTime& result, const std::string& format = "") {
-        try {
+
+    /**
+     * @brief 安全地尝试解析日期时间字符串。
+     *
+     * 使用示例:
+     * @code{.cpp}
+     *   DateTime result;
+     *   if (DateTime::TryParse("2024-06-07", result)) {
+     *       // 解析成功
+     *   } else {
+     *       // 解析失败
+     *   }
+     * @endcode
+     *
+     * @param str 要解析的字符串
+     * @param result [out] 解析成功时输出的 DateTime
+     * @param format C# 风格格式字符串（为空时自动检测）
+     * @return true 如果解析成功，false 否则
+     */
+    static bool TryParse(const std::string &str, DateTime &result, const std::string &format = "")
+    {
+        try
+        {
             result = Parse(str, format);
             return true;
-        } catch (...) {
+        }
+        catch (...)
+        {
             return false;
         }
     }
-    
-    DateTime AddDays(int days) const {
-        DateTime result = *this;
-        result.time_point_ += std::chrono::hours(24 * days);
-        return result;
-    }
-    
-    DateTime AddHours(int hours) const {
-        DateTime result = *this;
-        result.time_point_ += std::chrono::hours(hours);
-        return result;
-    }
-    
-    DateTime AddMinutes(int minutes) const {
-        DateTime result = *this;
-        result.time_point_ += std::chrono::minutes(minutes);
-        return result;
-    }
-    
-    DateTime AddSeconds(int seconds) const {
-        DateTime result = *this;
-        result.time_point_ += std::chrono::seconds(seconds);
-        return result;
-    }
-    
-    DateTime AddMilliseconds(int milliseconds) const {
-        DateTime result = *this;
-        result.time_point_ += std::chrono::milliseconds(milliseconds);
-        return result;
-    }
-    
-    DateTime AddMonths(int months) {
-        std::tm tm = get_tm();
-        tm.tm_mon += months;
-        
-        while (tm.tm_mon > 11) {
-            tm.tm_mon -= 12;
-            tm.tm_year++;
-        }
-        while (tm.tm_mon < 0) {
-            tm.tm_mon += 12;
-            tm.tm_year--;
-        }
-        
-        int max_day = days_in_month(tm.tm_year + 1900, tm.tm_mon + 1);
-        if (tm.tm_mday > max_day) {
-            tm.tm_mday = max_day;
-        }
-        
-        DateTime result(std::mktime(&tm));
-        result.time_point_ += std::chrono::milliseconds(GetMillisecond());
-        return result;
-    }
-    
-    DateTime AddYears(int years) {
-        std::tm tm = get_tm();
-        tm.tm_year += years;
-        
-        if (tm.tm_mon == 1 && tm.tm_mday == 29) {
-            if (!is_leap_year(tm.tm_year + 1900)) {
-                tm.tm_mday = 28;
-            }
-        }
-        
-        DateTime result(std::mktime(&tm));
-        result.time_point_ += std::chrono::milliseconds(GetMillisecond());
-        return result;
+
+    /**
+     * @brief 将指定的 TimeSpan 添加到当前 DateTime。
+     * @param value 要添加的时间间隔
+     * @return 新的 DateTime
+     * @throw std::runtime_error 如果结果超出有效范围
+     */
+    DateTime Add(const TimeSpan &value) const
+    {
+        int64_t nt = ticks_ + value.GetTicks();
+        if (nt < detail::MinTicks || nt > detail::MaxTicks)
+            throw std::runtime_error("DateTime arithmetic out of range");
+        return DateTime(nt, kind_);
     }
 
-    private:
+    /** @brief 返回一个新的 DateTime，将当前对象加上指定天数。 */
+    DateTime AddDays(int d) const { return Add(TimeSpan(d, 0, 0, 0)); }
+    /** @brief 返回一个新的 DateTime，将当前对象加上指定小时数。 */
+    DateTime AddHours(int h) const { return Add(TimeSpan(0, h, 0, 0)); }
+    /** @brief 返回一个新的 DateTime，将当前对象加上指定分钟数。 */
+    DateTime AddMinutes(int m) const { return Add(TimeSpan(0, 0, m, 0)); }
+    /** @brief 返回一个新的 DateTime，将当前对象加上指定秒数。 */
+    DateTime AddSeconds(int s) const { return Add(TimeSpan(0, 0, s)); }
+    /** @brief 返回一个新的 DateTime，将当前对象加上指定毫秒数。 */
+    DateTime AddMilliseconds(int ms) const { return Add(TimeSpan(0, 0, 0, 0, ms)); }
 
-    static bool is_leap_year(int year) {
-        return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    }
-    
-    static int days_in_month(int year, int month) {
-        static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-        if (month == 2 && is_leap_year(year)) {
-            return 29;
+    /**
+     * @brief 返回一个新的 DateTime，将当前对象加上指定月数。
+     *
+     * 如果结果日期超出目标月份的天数，则自动调整到月末。
+     * 例如: 1月31日 + 1个月 = 2月28/29日。
+     *
+     * @param months 月数（可为负数）
+     * @throw std::runtime_error 如果结果超出有效范围
+     */
+    DateTime AddMonths(int months) const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        m += months;
+        while (m > 12)
+        {
+            m -= 12;
+            y++;
         }
-        return days[month - 1];
+        while (m < 1)
+        {
+            m += 12;
+            y--;
+        }
+        int md = detail::days_in_month(y, m);
+        if (d > md)
+            d = md;
+        int64_t nt = detail::date_to_ticks(y, m, d) + time_of_day_ticks();
+        if (nt < detail::MinTicks || nt > detail::MaxTicks)
+            throw std::runtime_error("DateTime arithmetic out of range");
+        return DateTime(nt, kind_);
     }
 
-    public:
-    
-    double TotalDaysSince(const DateTime& other) const {
-        auto diff = time_point_ - other.time_point_;
-        auto hours = std::chrono::duration_cast<std::chrono::hours>(diff);
-        return hours.count() / 24.0;
+    /**
+     * @brief 返回一个新的 DateTime，将当前对象加上指定年数。
+     *
+     * 如果当前日期为闰年 2 月 29 日，且目标年份不是闰年，则自动调整为 2 月 28 日。
+     *
+     * @param years 年数（可为负数）
+     * @throw std::runtime_error 如果结果超出有效范围
+     */
+    DateTime AddYears(int years) const
+    {
+        int y, m, d;
+        detail::ticks_to_date(ticks_, y, m, d);
+        y += years;
+        if (m == 2 && d == 29 && !detail::is_leap_year(y))
+            d = 28;
+        int64_t nt = detail::date_to_ticks(y, m, d) + time_of_day_ticks();
+        if (nt < detail::MinTicks || nt > detail::MaxTicks)
+            throw std::runtime_error("DateTime arithmetic out of range");
+        return DateTime(nt, kind_);
     }
-    
-    double TotalHoursSince(const DateTime& other) const {
-        auto diff = time_point_ - other.time_point_;
-        auto hours = std::chrono::duration_cast<std::chrono::hours>(diff);
-        return hours.count();
+
+    /** @brief 从此 DateTime 减去一个 TimeSpan，返回新的 DateTime。 */
+    DateTime Subtract(const TimeSpan &ts) const { return Add(TimeSpan(-ts.GetTicks())); }
+    /** @brief 从此 DateTime 减去另一个 DateTime，返回 TimeSpan 差。 */
+    TimeSpan Subtract(const DateTime &dt) const { return TimeSpan(ticks_ - dt.ticks_); }
+
+    /**
+     * @brief 将当前 DateTime 转换为 UTC 时间。
+     *
+     * - 如果 Kind 为 Utc，则返回自身。
+     * - 如果 Kind 为 Local 或 Unspecified，假定当前值为本地时间并转换为 UTC。
+     *
+     * @return 表示 UTC 时间的 DateTime，Kind=Utc
+     */
+    DateTime ToUniversalTime() const
+    {
+        if (kind_ == DateTimeKind::Utc)
+            return *this;
+        std::tm ltm = get_tm_local();
+        std::time_t tt = std::mktime(&ltm);
+        if (tt == -1)
+            return DateTime(ticks_, DateTimeKind::Utc);
+#ifdef _WIN32
+        std::tm utm;
+        if (gmtime_s(&utm, &tt) != 0)
+            return DateTime(ticks_, DateTimeKind::Utc);
+#else
+        std::tm utm;
+        if (gmtime_r(&tt, &utm) == nullptr)
+            return DateTime(ticks_, DateTimeKind::Utc);
+#endif
+        int64_t ut = detail::date_to_ticks(utm.tm_year + 1900, utm.tm_mon + 1, utm.tm_mday) + (int64_t)utm.tm_hour * detail::TicksPerHour + (int64_t)utm.tm_min * detail::TicksPerMinute + (int64_t)utm.tm_sec * detail::TicksPerSecond + (ticks_ % detail::TicksPerSecond);
+        return DateTime(ut, DateTimeKind::Utc);
     }
-    
-    double TotalMinutesSince(const DateTime& other) const {
-        auto diff = time_point_ - other.time_point_;
-        auto minutes = std::chrono::duration_cast<std::chrono::minutes>(diff);
-        return minutes.count();
+
+    /**
+     * @brief 将当前 DateTime 转换为本地时间。
+     *
+     * - 如果 Kind 为 Local，则返回自身。
+     * - 如果 Kind 为 Utc 或 Unspecified，假定当前值为 UTC 时间并转换为本地时间。
+     *
+     * @return 表示本地时间的 DateTime，Kind=Local
+     */
+    DateTime ToLocalTime() const
+    {
+        if (kind_ == DateTimeKind::Local)
+            return *this;
+        std::tm utm = get_tm_utc();
+        utm.tm_isdst = -1;
+        std::time_t tt = std::mktime(&utm);
+        if (tt == -1)
+            return DateTime(ticks_, DateTimeKind::Local);
+#ifdef _WIN32
+        std::tm ltm;
+        if (localtime_s(&ltm, &tt) != 0)
+            return DateTime(ticks_, DateTimeKind::Local);
+#else
+        std::tm ltm;
+        if (localtime_r(&tt, &ltm) == nullptr)
+            return DateTime(ticks_, DateTimeKind::Local);
+#endif
+        int64_t lt = detail::date_to_ticks(ltm.tm_year + 1900, ltm.tm_mon + 1, ltm.tm_mday) + (int64_t)ltm.tm_hour * detail::TicksPerHour + (int64_t)ltm.tm_min * detail::TicksPerMinute + (int64_t)ltm.tm_sec * detail::TicksPerSecond + (ticks_ % detail::TicksPerSecond);
+        return DateTime(lt, DateTimeKind::Local);
     }
-    
-    double TotalSecondsSince(const DateTime& other) const {
-        auto diff = time_point_ - other.time_point_;
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(diff);
-        return seconds.count();
+
+    /**
+     * @brief 比较两个 DateTime 值。
+     * @return 如果 a < b 则为 -1；相等则为 0；如果 a > b 则为 1
+     */
+    static int Compare(const DateTime &a, const DateTime &b)
+    {
+        if (a.ticks_ < b.ticks_)
+            return -1;
+        if (a.ticks_ > b.ticks_)
+            return 1;
+        return 0;
     }
-    
-    bool operator==(const DateTime& other) const { return time_point_ == other.time_point_; }
-    bool operator!=(const DateTime& other) const { return time_point_ != other.time_point_; }
-    bool operator<(const DateTime& other) const { return time_point_ < other.time_point_; }
-    bool operator<=(const DateTime& other) const { return time_point_ <= other.time_point_; }
-    bool operator>(const DateTime& other) const { return time_point_ > other.time_point_; }
-    bool operator>=(const DateTime& other) const { return time_point_ >= other.time_point_; }
-    
-    static DateTime MinValue() {
-        return DateTime(0);
+    /** @brief 判断两个 DateTime 是否相等。 */
+    static bool Equals(const DateTime &a, const DateTime &b) { return a.ticks_ == b.ticks_; }
+    /**
+     * @brief 返回指定年份和月份的日期数。
+     * @param year 年份
+     * @param month 月份（1~12）
+     * @return 该月的天数（28~31）
+     * @throw std::runtime_error 如果月份不在 1~12 范围内
+     */
+    static int DaysInMonth(int year, int month)
+    {
+        if (month < 1 || month > 12)
+            throw std::runtime_error("Month must be 1-12");
+        return detail::days_in_month(year, month);
     }
-    
-    static DateTime MaxValue() {
-        return DateTime(253402300799);
+    /**
+     * @brief 判断指定年份是否为闰年。
+     * @return true 如果为闰年
+     */
+    static bool IsLeapYear(int year) { return detail::is_leap_year(year); }
+    /**
+     * @brief 返回一个新的 DateTime，其 Kind 设置为指定的值（ticks 不变）。
+     * @param v 原始 DateTime
+     * @param k 新的 DateTimeKind
+     * @return 具有相同 ticks 但 Kind 改变的新 DateTime
+     */
+    static DateTime SpecifyKind(const DateTime &v, DateTimeKind k) { return DateTime(v.ticks_, k); }
+
+    /** @brief 与另一个 DateTime 比较。返回 -1、0 或 1。 */
+    int CompareTo(const DateTime &o) const { return Compare(*this, o); }
+    /** @brief 判断当前 DateTime 与另一个是否相等。 */
+    bool Equals(const DateTime &o) const { return ticks_ == o.ticks_; }
+
+    /** @brief 判断两个 DateTime 是否相等。 */
+    bool operator==(const DateTime &o) const { return ticks_ == o.ticks_; }
+    /** @brief 判断两个 DateTime 是否不等。 */
+    bool operator!=(const DateTime &o) const { return ticks_ != o.ticks_; }
+    /** @brief 判断当前 DateTime 是否小于另一个。 */
+    bool operator<(const DateTime &o) const { return ticks_ < o.ticks_; }
+    /** @brief 判断当前 DateTime 是否小于等于另一个。 */
+    bool operator<=(const DateTime &o) const { return ticks_ <= o.ticks_; }
+    /** @brief 判断当前 DateTime 是否大于另一个。 */
+    bool operator>(const DateTime &o) const { return ticks_ > o.ticks_; }
+    /** @brief 判断当前 DateTime 是否大于等于另一个。 */
+    bool operator>=(const DateTime &o) const { return ticks_ >= o.ticks_; }
+
+    /** @brief DateTime + TimeSpan，返回新的 DateTime。 */
+    DateTime operator+(const TimeSpan &ts) const { return Add(ts); }
+    /** @brief DateTime - TimeSpan，返回新的 DateTime。 */
+    DateTime operator-(const TimeSpan &ts) const { return Subtract(ts); }
+    /** @brief DateTime - DateTime，返回 TimeSpan 差。 */
+    TimeSpan operator-(const DateTime &o) const { return Subtract(o); }
+    /** @brief 将 TimeSpan 添加到当前 DateTime。 */
+    DateTime &operator+=(const TimeSpan &ts)
+    {
+        *this = Add(ts);
+        return *this;
     }
-    
-    friend std::ostream& operator<<(std::ostream& os, const DateTime& dt) {
+    /** @brief 从当前 DateTime 减去 TimeSpan。 */
+    DateTime &operator-=(const TimeSpan &ts)
+    {
+        *this = Subtract(ts);
+        return *this;
+    }
+
+    /** @brief 将 DateTime 输出到流（使用默认格式 yyyy-MM-dd HH:mm:ss）。 */
+    friend std::ostream &operator<<(std::ostream &os, const DateTime &dt)
+    {
         os << dt.ToString();
         return os;
     }
-    
-    friend std::istream& operator>>(std::istream& is, DateTime& dt) {
-        std::string str;
-        if (!(is >> str)) {
+
+    /**
+     * @brief 从输入流读取 DateTime 字符串。
+     *
+     * 使用 TryParse 进行自动格式检测。如果解析失败，设置流的 failbit。
+     *
+     * 使用示例:
+     * @code{.cpp}
+     *   DateTime dt;
+     *   std::cin >> dt;  // 输入 "2024-06-07 14:30:00"
+     * @endcode
+     */
+    friend std::istream &operator>>(std::istream &is, DateTime &dt)
+    {
+        std::string s;
+        if (!(is >> s))
             return is;
-        }
-        DateTime result;
-        if (DateTime::TryParse(str, result)) {
-            dt = result;
-        } else {
+        DateTime r;
+        if (TryParse(s, r))
+            dt = r;
+        else
             is.setstate(std::ios::failbit);
-        }
         return is;
     }
+
+    /** @brief TimeSpan + DateTime，返回新的 DateTime。 */
+    friend DateTime operator+(const TimeSpan &ts, const DateTime &dt) { return dt.Add(ts); }
 };
 
-#endif
+#endif // __INC_GL_DATETIME_
