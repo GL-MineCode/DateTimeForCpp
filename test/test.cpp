@@ -227,6 +227,42 @@ void test_new_features() {
     printf("SpecifyKind:    kind=%d\n", (int)spec.GetKind());
 }
 
+void test_predefined_formats() {
+    printf("\n===== Predefined Format Tests =====\n");
+    DateTime dt(2024, 6, 7, 14, 30, 45, 789);
+
+    printf("ToString(\"d\"):  %s\n", dt.ToString("d").c_str());
+    printf("ToString(\"D\"):  %s\n", dt.ToString("D").c_str());
+    printf("ToString(\"f\"):  %s\n", dt.ToString("f").c_str());
+    printf("ToString(\"F\"):  %s\n", dt.ToString("F").c_str());
+    printf("ToString(\"g\"):  %s\n", dt.ToString("g").c_str());
+    printf("ToString(\"G\"):  %s\n", dt.ToString("G").c_str());
+    printf("ToString(\"M\"):  %s\n", dt.ToString("M").c_str());
+    printf("ToString(\"o\"):  %s\n", dt.ToString("o").c_str());
+    printf("ToString(\"R\"):  %s\n", dt.ToString("R").c_str());
+    printf("ToString(\"s\"):  %s\n", dt.ToString("s").c_str());
+    printf("ToString(\"t\"):  %s\n", dt.ToString("t").c_str());
+    printf("ToString(\"T\"):  %s\n", dt.ToString("T").c_str());
+    printf("ToString(\"u\"):  %s\n", dt.ToString("u").c_str());
+    printf("ToString(\"U\"):  %s\n", dt.ToString("U").c_str());
+    printf("ToString(\"Y\"):  %s\n", dt.ToString("Y").c_str());
+
+    // Parse with predefined format
+    try {
+        DateTime parsed = DateTime::Parse("06/07/2024", "d");
+        printf("Parse(\"06/07/2024\",\"d\"): %s\n", parsed.ToString().c_str());
+    } catch (const std::exception& e) {
+        printf("Parse with d failed: %s\n", e.what());
+    }
+
+    try {
+        DateTime parsed = DateTime::Parse("2024-06-07T14:30:45", "s");
+        printf("Parse(\"2024-06-07T14:30:45\",\"s\"): %s\n", parsed.ToString().c_str());
+    } catch (const std::exception& e) {
+        printf("Parse with s failed: %s\n", e.what());
+    }
+}
+
 void test_timespan() {
     printf("\n===== TimeSpan Tests =====\n");
 
@@ -288,6 +324,7 @@ int main() {
     test_stream();
     test_edge_cases();
     test_new_features();
+    test_predefined_formats();
     test_timespan();
 
     printf("\n===== All tests completed =====\n");
