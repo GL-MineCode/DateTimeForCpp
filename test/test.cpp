@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <iostream>
+#include <sstream>
 #include "GL_DateTime.hpp"
 
 void test_constructors() {
@@ -261,6 +262,57 @@ void test_predefined_formats() {
     } catch (const std::exception& e) {
         printf("Parse with s failed: %s\n", e.what());
     }
+
+    try {
+        DateTime parsed = DateTime::Parse("Fri, 07 Jun 2024 22:30:45 GMT", "R");
+        printf("Parse(\"Fri, 07 Jun 2024 22:30:45 GMT\",\"R\"): %s\n", parsed.ToString().c_str());
+    } catch (const std::exception& e) {
+        printf("Parse with R failed: %s\n", e.what());
+    }
+}
+
+void test_roundtrip() {
+    printf("\n===== Round-trip Tests (ToString → Parse) =====\n");
+    DateTime dt(2024, 6, 7, 14, 30, 45, 789);
+    bool all_ok = true;
+
+    // All predefined format specifiers that produce complete date+time
+    struct { const char* name; const char* fmt; } tests[] = {
+        {"default",  "yyyy-MM-dd HH:mm:ss"},
+        {"d", "d"}, {"D", "D"}, {"f", "f"}, {"F", "F"},
+        {"g", "g"}, {"G", "G"}, {"M", "M"},
+        {"o", "o"}, {"s", "s"}, {"u", "u"},
+        {"Y", "Y"}, {"R", "R"},
+    };
+
+    for (auto& t : tests) {
+        std::string out = dt.ToString(t.fmt);
+        DateTime parsed;
+        bool ok = DateTime::TryParse(out, parsed);
+        if (!ok) {
+            printf("FAIL [%s]: \"%s\" -> could not parse\n", t.name, out.c_str());
+            all_ok = false;
+        }
+    }
+
+    // Test shortcut methods
+    struct { const char* name; std::string (*func)(const DateTime&); } shortcuts[] = {
+        {"ToShortDateString",  [](const DateTime& d){ return d.ToShortDateString(); }},
+        {"ToLongDateString",   [](const DateTime& d){ return d.ToLongDateString(); }},
+        {"operator<< (default)",[](const DateTime& d){ std::ostringstream ss; ss << d; return ss.str(); }},
+    };
+    for (auto& s : shortcuts) {
+        std::string out = s.func(dt);
+        DateTime parsed;
+        bool ok = DateTime::TryParse(out, parsed);
+        if (!ok) {
+            printf("FAIL [%s]: \"%s\" -> could not parse\n", s.name, out.c_str());
+            all_ok = false;
+        }
+    }
+
+    if (all_ok)
+        printf("All round-trip tests passed.\n");
 }
 
 void test_timespan() {
@@ -325,6 +377,7 @@ int main() {
     test_edge_cases();
     test_new_features();
     test_predefined_formats();
+    test_roundtrip();
     test_timespan();
 
     printf("\n===== All tests completed =====\n");
