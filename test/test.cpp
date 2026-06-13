@@ -5,7 +5,7 @@
 void test_constructors() {
     printf("===== Constructor Test =====\n");
     
-    DateTime dt1;
+    DateTime dt1 = DateTime::Now();
     printf("Now:            %s\n", dt1.ToString().c_str());
     
     DateTime dt2(2024, 6, 7, 12, 30, 0, 456);
@@ -107,9 +107,11 @@ void test_comparison() {
     printf("dt1 <  dt2: %s\n", (dt1 < dt2) ? "true" : "false");
     printf("dt1 >  dt2: %s\n", (dt1 > dt2) ? "true" : "false");
     
-    printf("dt2 - dt1 = %.0f day(s)\n", dt2.TotalDaysSince(dt1));
-    printf("dt2 - dt1 = %.0f hour(s)\n", dt2.TotalHoursSince(dt1));
-    printf("dt2 - dt1 = %.0f minute(s)\n", dt2.TotalMinutesSince(dt1));
+    TimeSpan diff = dt2 - dt1;
+    printf("dt2 - dt1 = %.0f day(s)\n", diff.GetTotalDays());
+    printf("dt2 - dt1 = %.0f hour(s)\n", diff.GetTotalHours());
+    printf("dt2 - dt1 = %.0f minute(s)\n", diff.GetTotalMinutes());
+    printf("dt2 - dt1 = %lld ticks\n", (long long)diff.GetTicks());
 }
 
 void test_stream() {
@@ -165,6 +167,117 @@ void test_edge_cases() {
     printf("TryParse bad:   %s\n", ok ? "succeeded (unexpected)" : "failed (expected)");
 }
 
+void test_new_features() {
+    printf("\n===== New Feature Tests =====\n");
+
+    DateTime dt(2024, 6, 7, 10, 30, 45, 123);
+
+    // Ticks
+    printf("Ticks:          %lld\n", (long long)dt.GetTicks());
+
+    // Date (time of day at 00:00:00)
+    DateTime dateOnly = dt.GetDate();
+    printf("Date:           %s\n", dateOnly.ToString().c_str());
+    printf("Date.Hour:      %d\n", dateOnly.GetHour());
+
+    // TimeOfDay (TimeSpan)
+    TimeSpan tod = dt.GetTimeOfDay();
+    printf("TimeOfDay:      %s\n", tod.ToString().c_str());
+    printf("TimeOfDay hrs:  %.2f\n", tod.GetTotalHours());
+
+    // Kind
+    DateTime local = DateTime::Now();
+    DateTime utc = DateTime::UtcNow();
+    printf("Kind Local:     %d\n", (int)local.GetKind());
+    printf("Kind Utc:       %d\n", (int)utc.GetKind());
+
+    // ToUniversalTime / ToLocalTime
+    DateTime conv = local.ToUniversalTime();
+    printf("Local->UTC:     %s (kind=%d)\n", conv.ToString().c_str(), (int)conv.GetKind());
+
+    // Subtract(DateTime) -> TimeSpan
+    DateTime dtA(2024, 6, 10, 12, 0, 0);
+    DateTime dtB(2024, 6, 7, 12, 0, 0);
+    TimeSpan span = dtA.Subtract(dtB);
+    printf("Sub(dt):        %.0f days\n", span.GetTotalDays());
+
+    // Subtract(TimeSpan) -> DateTime
+    DateTime dtC = dtA.Subtract(TimeSpan(3, 0, 0, 0));
+    printf("Sub(ts):        %s\n", dtC.ToString().c_str());
+
+    // Add(TimeSpan)
+    DateTime dtD = dtB.Add(TimeSpan(5, 0, 0, 0));
+    printf("Add(ts):        %s\n", dtD.ToString().c_str());
+
+    // Operator+ (TimeSpan + DateTime)
+    DateTime dtE = TimeSpan(1, 0, 0, 0) + dtB;
+    printf("ts+dt:          %s\n", dtE.ToString().c_str());
+
+    // Static methods
+    printf("DaysInMonth(2024,2): %d\n", DateTime::DaysInMonth(2024, 2));
+    printf("IsLeapYear(2024):   %s\n", DateTime::IsLeapYear(2024) ? "true" : "false");
+    printf("IsLeapYear(2023):   %s\n", DateTime::IsLeapYear(2023) ? "true" : "false");
+
+    // Default constructor = MinValue
+    DateTime def;
+    printf("Default():      %s\n", def.ToString().c_str());
+
+    // SpecifyKind
+    DateTime spec = DateTime::SpecifyKind(def, DateTimeKind::Utc);
+    printf("SpecifyKind:    kind=%d\n", (int)spec.GetKind());
+}
+
+void test_timespan() {
+    printf("\n===== TimeSpan Tests =====\n");
+
+    // Constructors
+    TimeSpan ts1;
+    printf("Default:        %s\n", ts1.ToString().c_str());
+
+    TimeSpan ts2(1, 2, 3, 4, 567);
+    printf("(1,2,3,4,567):  %s\n", ts2.ToString().c_str());
+
+    TimeSpan ts3(10, 30, 45);
+    printf("(10,30,45):     %s\n", ts3.ToString().c_str());
+
+    // Properties
+    printf("Days:           %d\n", ts2.GetDays());
+    printf("Hours:          %d\n", ts2.GetHours());
+    printf("Minutes:        %d\n", ts2.GetMinutes());
+    printf("Seconds:        %d\n", ts2.GetSeconds());
+    printf("Milliseconds:   %d\n", ts2.GetMilliseconds());
+    printf("Ticks:          %lld\n", (long long)ts2.GetTicks());
+    printf("TotalDays:      %f\n", ts2.GetTotalDays());
+    printf("TotalHours:     %f\n", ts2.GetTotalHours());
+    printf("TotalMinutes:   %f\n", ts2.GetTotalMinutes());
+    printf("TotalSeconds:   %f\n", ts2.GetTotalSeconds());
+    printf("TotalMs:        %f\n", ts2.GetTotalMilliseconds());
+
+    // Static methods
+    TimeSpan fromDays = TimeSpan::FromDays(1.5);
+    printf("FromDays(1.5):  %s\n", fromDays.ToString().c_str());
+
+    TimeSpan fromHours = TimeSpan::FromHours(2.5);
+    printf("FromHours(2.5): %s\n", fromHours.ToString().c_str());
+
+    // Arithmetic
+    TimeSpan tsA(2, 0, 0, 0);
+    TimeSpan tsB(1, 12, 0, 0);
+    printf("tsA+tsB:        %s\n", (tsA + tsB).ToString().c_str());
+    printf("tsA-tsB:        %s\n", (tsA - tsB).ToString().c_str());
+    printf("Negate tsA:     %s\n", (-tsA).ToString().c_str());
+    printf("Duration tsA:   %s\n", tsA.Duration().ToString().c_str());
+
+    // Comparison
+    TimeSpan tsC(1, 0, 0, 0);
+    TimeSpan tsD(2, 0, 0, 0);
+    printf("tsC==tsD:       %s\n", (tsC == tsD) ? "true" : "false");
+    printf("tsC<tsD:        %s\n", (tsC < tsD) ? "true" : "false");
+
+    // Static Zero/MinValue/MaxValue
+    printf("Zero:           %s\n", TimeSpan::Zero().ToString().c_str());
+}
+
 int main() {
     test_constructors();
     test_properties();
@@ -174,7 +287,9 @@ int main() {
     test_comparison();
     test_stream();
     test_edge_cases();
-    
+    test_new_features();
+    test_timespan();
+
     printf("\n===== All tests completed =====\n");
     return 0;
 }
