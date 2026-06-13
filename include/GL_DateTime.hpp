@@ -815,10 +815,10 @@ public:
     /**
      * @brief 从指定的 ticks 和 DateTimeKind 构造 DateTime。
      * @param ticks 自 0001-01-01 以来的 100 纳秒间隔数
-     * @param kind DateTimeKind（默认为 Unspecified）
+     * @param kind DateTimeKind（比如Unspecified）
      * @throw std::runtime_error 如果 ticks 超出有效范围 [MinTicks, MaxTicks]
      */
-    explicit DateTime(int64_t ticks, DateTimeKind kind = DateTimeKind::Unspecified)
+    explicit DateTime(int64_t ticks, DateTimeKind kind)
         : ticks_(ticks), kind_(kind)
     {
         if (ticks_ < detail::MinTicks || ticks_ > detail::MaxTicks)
