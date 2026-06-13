@@ -19,7 +19,7 @@ all: $(TARGETS)
 
 # Make build dir
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
 
 # test - Test for DateTime
 $(BUILD_DIR)/test.exe: test/test.cpp | $(BUILD_DIR)
@@ -28,4 +28,5 @@ $(BUILD_DIR)/test.exe: test/test.cpp | $(BUILD_DIR)
 test: $(BUILD_DIR)/test.exe
 
 clean:
+	@if exist "$(BUILD_DIR)" rmdir /s /q "$(BUILD_DIR)"
 	-if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
