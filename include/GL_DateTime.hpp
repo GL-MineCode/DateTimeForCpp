@@ -689,6 +689,37 @@ private:
         return true;
     }
 
+    // 预定义格式字符串映射表（与 C# 一致）
+    static std::string expand_predefined_format(const std::string &format)
+    {
+        if (format.size() != 1)
+            return format;
+        char c = format[0];
+        switch (c)
+        {
+        case 'd': return "MM/dd/yyyy";
+        case 'D': return "dddd, MMMM dd, yyyy";
+        case 'f': return "dddd, MMMM dd, yyyy HH:mm";
+        case 'F': return "dddd, MMMM dd, yyyy HH:mm:ss";
+        case 'g': return "MM/dd/yyyy HH:mm";
+        case 'G': return "MM/dd/yyyy HH:mm:ss";
+        case 'm':
+        case 'M': return "MMMM dd";
+        case 'o':
+        case 'O': return "yyyy-MM-ddTHH:mm:ss.fffffff";
+        case 'r':
+        case 'R': return "ddd, dd MMM yyyy HH:mm:ss 'GMT'";
+        case 's': return "yyyy-MM-ddTHH:mm:ss";
+        case 't': return "HH:mm";
+        case 'T': return "HH:mm:ss";
+        case 'u': return "yyyy-MM-dd HH:mm:ss'Z'";
+        case 'U': return "dddd, MMMM dd, yyyy HH:mm:ss"; // 需要先 ToUniversalTime()
+        case 'y':
+        case 'Y': return "yyyy MMMM";
+        default:  return format;
+        }
+    }
+
 public:
 
     /**
@@ -885,9 +916,37 @@ public:
     /**
      * @brief 使用指定的格式将当前 DateTime 转换为字符串。
      *
-     * 支持的格式说明符（与 C# 一致）：
+     * 支持自定义格式说明符和预定义简写格式说明符（与 C# 一致）。
      *
-     * | 说明符 | 含义           | 示例              |
+     * ### 预定义格式简写（单字符）
+     *
+     * | 说明符 | 含义                | 展开格式                          |
+     * |--------|---------------------|-----------------------------------|
+     * | d      | 短日期              | MM/dd/yyyy                       |
+     * | D      | 长日期              | dddd, MMMM dd, yyyy              |
+     * | f      | 完整日期+短时间      | dddd, MMMM dd, yyyy HH:mm        |
+     * | F      | 完整日期+长时间      | dddd, MMMM dd, yyyy HH:mm:ss     |
+     * | g      | 常规日期+短时间      | MM/dd/yyyy HH:mm                 |
+     * | G      | 常规日期+长时间      | MM/dd/yyyy HH:mm:ss              |
+     * | M / m  | 月/日               | MMMM dd                          |
+     * | O / o  | 往返日期/时间       | yyyy-MM-ddTHH:mm:ss.fffffff      |
+     * | R / r  | RFC1123             | ddd, dd MMM yyyy HH:mm:ss 'GMT'  |
+     * | s      | 可排序              | yyyy-MM-ddTHH:mm:ss              |
+     * | t      | 短时间              | HH:mm                            |
+     * | T      | 长时间              | HH:mm:ss                         |
+     * | u      | 通用可排序          | yyyy-MM-dd HH:mm:ss'Z'           |
+     * | U      | 通用完整            | 先 ToUniversalTime() 再使用 F 格式 |
+     * | Y / y  | 年/月               | yyyy MMMM                        |
+     *
+     * 使用示例:
+     * @code{.cpp}
+     *   dt.ToString("d");  // "06/07/2024"
+     *   dt.ToString("D");  // "Friday, June 07, 2024"
+     *   dt.ToString("o");  // "2024-06-07T14:05:03.7890000"
+     *   dt.ToString("s");  // "2024-06-07T14:05:03"
+     * @endcode
+     *
+     * ### 自定义格式说明符
      * |--------|----------------|-------------------|
      * | y      | 短年份（不补零）| 24                |
      * | yy     | 短年份（补零）  | 24                |
@@ -933,64 +992,71 @@ public:
     {
         if (format.empty())
             return ToString("yyyy-MM-dd HH:mm:ss");
+        // 展开预定义格式简写
+        std::string fmt = expand_predefined_format(format);
+        // 特殊处理 "U"（Universal full）— 先转换 UTC 再使用 "F" 格式
+        if (format.size() == 1 && format[0] == 'U')
+        {
+            return ToUniversalTime().ToString("F");
+        }
         try
         {
             std::tm tm = get_tm();
             std::string result;
-            for (size_t i = 0; i < format.size();)
+            for (size_t i = 0; i < fmt.size();)
             {
-                char c = format[i];
+                char c = fmt[i];
                 if (c == '\'')
                 {
                     i++;
-                    size_t eq = format.find('\'', i);
+                    size_t eq = fmt.find('\'', i);
                     if (eq == std::string::npos)
                         throw std::runtime_error("Unclosed quote");
-                    result += format.substr(i, eq - i);
+                    result += fmt.substr(i, eq - i);
                     i = eq + 1;
                 }
                 else if (c == 'y' || c == 'M' || c == 'd' || c == 'H' || c == 'h' || c == 'm' || c == 's' || c == 't')
                 {
                     size_t cnt = 1;
-                    while (i + cnt < format.size() && format[i + cnt] == c)
+                    while (i + cnt < fmt.size() && fmt[i + cnt] == c)
                         cnt++;
-                    const char *fmt = "";
+                    const char *strf = "";
                     switch (c)
                     {
                     case 'y':
-                        fmt = (cnt >= 4) ? "%Y" : "%y";
+                        strf = (cnt >= 4) ? "%Y" : "%y";
                         break;
                     case 'M':
-                        fmt = (cnt >= 4) ? "%B" : (cnt == 3 ? "%b" : "%m");
+                        strf = (cnt >= 4) ? "%B" : (cnt == 3 ? "%b" : "%m");
                         break;
                     case 'd':
-                        fmt = (cnt >= 4) ? "%A" : (cnt == 3 ? "%a" : "%d");
+                        strf = (cnt >= 4) ? "%A" : (cnt == 3 ? "%a" : "%d");
                         break;
                     case 'H':
-                        fmt = "%H";
+                        strf = "%H";
                         break;
                     case 'h':
-                        fmt = "%I";
+                        strf = "%I";
                         break;
                     case 'm':
-                        fmt = "%M";
+                        strf = "%M";
                         break;
                     case 's':
-                        fmt = "%S";
+                        strf = "%S";
                         break;
                     case 't':
-                        fmt = "%p";
+                        strf = "%p";
                         break;
                     }
                     char buf[64] = {};
-                    std::strftime(buf, sizeof(buf), fmt, &tm);
+                    std::strftime(buf, sizeof(buf), strf, &tm);
                     result += buf;
                     i += cnt;
                 }
                 else if (c == 'f')
                 {
                     size_t cnt = 1;
-                    while (i + cnt < format.size() && format[i + cnt] == 'f')
+                    while (i + cnt < fmt.size() && fmt[i + cnt] == 'f')
                         cnt++;
                     int ms = GetMillisecond();
                     char buf[16] = {};
@@ -1074,7 +1140,9 @@ public:
      */
     static DateTime Parse(const std::string &str, const std::string &format = "")
     {
-        if (format.empty())
+        // 展开预定义格式简写
+        std::string fmt = expand_predefined_format(format);
+        if (fmt.empty())
         {
             static const char *fmts[] = {
                 "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd",
@@ -1095,9 +1163,9 @@ public:
         }
         int year = 1900, month = 1, day = 1, hour = 0, minute = 0, second = 0, ms = 0;
         bool is_pm = false;
-        if (try_parse_csharp_format(str, format, year, month, day, hour, minute, second, ms, is_pm))
+        if (try_parse_csharp_format(str, fmt, year, month, day, hour, minute, second, ms, is_pm))
             return DateTime(year, month, day, hour, minute, second, ms);
-        throw std::runtime_error("Unable to parse \"" + str + "\" with format \"" + format + "\"");
+        throw std::runtime_error("Unable to parse \"" + str + "\" with format \"" + fmt + "\"");
     }
 
     /**
