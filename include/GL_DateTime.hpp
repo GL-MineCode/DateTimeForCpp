@@ -525,7 +525,48 @@ private:
                                         int &hour, int &minute, int &second, int &millisecond,
                                         bool &is_pm)
     {
+        // English weekday/month names for parsing text-based specifiers (ddd/dddd/MMM/MMMM)
+        static const char *month_names_full[12] = {
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"};
+        static const char *month_names_abbr[12] = {
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        static const char *weekday_names_full[7] = {
+            "Sunday", "Monday", "Tuesday", "Wednesday",
+            "Thursday", "Friday", "Saturday"};
+        static const char *weekday_names_abbr[7] = {
+            "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
         size_t str_idx = 0, fmt_idx = 0;
+
+        auto match_name = [&](const char *const *names, int count, bool full) -> int {
+            for (int i = 0; i < count; i++)
+            {
+                size_t len = strlen(names[i]);
+                if (!full)
+                    len = 3;
+                if (str_idx + len <= str.size())
+                {
+                    bool ok = true;
+                    for (size_t k = 0; k < len; k++)
+                    {
+                        if (std::toupper((unsigned char)str[str_idx + k]) !=
+                            std::toupper((unsigned char)names[i][k]))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok)
+                    {
+                        str_idx += len;
+                        return i;
+                    }
+                }
+            }
+            return -1;
+        };
         is_pm = false;
         while (fmt_idx < format.length() && str_idx < str.length())
         {
@@ -554,6 +595,42 @@ private:
                     cnt++;
                 if (str_idx >= str.size())
                     return false;
+
+                // Handle text-based specifiers: ddd/dddd (weekday) and MMM/MMMM (month)
+                if (fc == 'd' && cnt >= 3)
+                {
+                    int wd = match_name(weekday_names_abbr, 7, false);
+                    if (wd < 0)
+                        return false;
+                    // For dddd (full name), try to match more; skip extra chars
+                    if (cnt >= 4)
+                    {
+                        // Already matched 3 chars of abbreviation; try full match
+                        str_idx -= 3; // backtrack to re-match full name
+                        wd = match_name(weekday_names_full, 7, true);
+                        if (wd < 0)
+                            return false;
+                    }
+                    fmt_idx += cnt;
+                    continue;
+                }
+                if (fc == 'M' && cnt >= 3)
+                {
+                    int mn = match_name(month_names_abbr, 12, false);
+                    if (mn < 0)
+                        return false;
+                    if (cnt >= 4)
+                    {
+                        str_idx -= 3;
+                        mn = match_name(month_names_full, 12, true);
+                        if (mn < 0)
+                            return false;
+                    }
+                    month = mn + 1;
+                    fmt_idx += cnt;
+                    continue;
+                }
+
                 if (fc != 't' && !std::isdigit((unsigned char)str[str_idx]))
                     return false;
                 int val = 0;
@@ -1102,8 +1179,8 @@ public:
 
     /** @brief 返回短日期字符串（格式: yyyy-MM-dd）。 */
     std::string ToShortDateString() const { return ToString("yyyy-MM-dd"); }
-    /** @brief 返回长日期字符串（格式: dddd, MMMM d, yyyy，例如 "Friday, June 7, 2024"）。 */
-    std::string ToLongDateString() const { return ToString("dddd, MMMM d, yyyy"); }
+    /** @brief 返回长日期字符串（格式: dddd, MMMM dd, yyyy，例如 "Friday, June 07, 2024"）。 */
+    std::string ToLongDateString() const { return ToString("dddd, MMMM dd, yyyy"); }
     /** @brief 返回短时间字符串（格式: HH:mm）。 */
     std::string ToShortTimeString() const { return ToString("HH:mm"); }
     /** @brief 返回长时间字符串（格式: HH:mm:ss）。 */
@@ -1114,13 +1191,26 @@ public:
      *
      * 自动检测的格式（当 format 为空时按顺序尝试）：
      * - yyyy-MM-dd HH:mm:ss
+     * - yyyy-MM-dd HH:mm
      * - yyyy-MM-dd
      * - MM/dd/yyyy HH:mm:ss
+     * - MM/dd/yyyy HH:mm
      * - MM/dd/yyyy
      * - dd/MM/yyyy HH:mm:ss
+     * - dd/MM/yyyy HH:mm
      * - dd/MM/yyyy
      * - yyyy/MM/dd HH:mm:ss
+     * - yyyy/MM/dd HH:mm
      * - yyyy/MM/dd
+     * - yyyy-MM-ddTHH:mm:ss.fffffff (往返格式 o)
+     * - yyyy-MM-ddTHH:mm:ss (可排序格式 s)
+     * - yyyy-MM-dd HH:mm:ss'Z' (通用可排序 u)
+     * - ddd, dd MMM yyyy HH:mm:ss 'GMT' (RFC1123 R)
+     * - dddd, MMMM dd, yyyy HH:mm:ss (完整格式 F)
+     * - dddd, MMMM dd, yyyy HH:mm (完整短时间 f)
+     * - dddd, MMMM dd, yyyy (长日期 D)
+     * - MMMM dd (月/日 M)
+     * - yyyy MMMM (年/月 Y)
      *
      * 使用示例:
      * @code{.cpp}
@@ -1145,10 +1235,27 @@ public:
         if (fmt.empty())
         {
             static const char *fmts[] = {
-                "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd",
-                "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy",
-                "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy",
-                "yyyy/MM/dd HH:mm:ss", "yyyy/MM/dd"};
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm",
+                "yyyy-MM-dd",
+                "MM/dd/yyyy HH:mm:ss",
+                "MM/dd/yyyy HH:mm",
+                "MM/dd/yyyy",
+                "dd/MM/yyyy HH:mm:ss",
+                "dd/MM/yyyy HH:mm",
+                "dd/MM/yyyy",
+                "yyyy/MM/dd HH:mm:ss",
+                "yyyy/MM/dd HH:mm",
+                "yyyy/MM/dd",
+                "yyyy-MM-ddTHH:mm:ss.fffffff",
+                "yyyy-MM-ddTHH:mm:ss",
+                "yyyy-MM-dd HH:mm:ss'Z'",
+                "ddd, dd MMM yyyy HH:mm:ss 'GMT'",
+                "dddd, MMMM dd, yyyy HH:mm:ss",
+                "dddd, MMMM dd, yyyy HH:mm",
+                "dddd, MMMM dd, yyyy",
+                "MMMM dd",
+                "yyyy MMMM"};
             for (auto f : fmts)
             {
                 try
