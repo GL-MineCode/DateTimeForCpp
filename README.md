@@ -129,7 +129,37 @@ mingw32-make test    # Build test/test.cpp
 
 ### ToString Format
 
-Uses C#-style format strings:
+Uses C#-style format strings, including both **predefined shorthand** (single character) and **custom** format specifiers.
+
+#### Predefined Format Specifiers
+
+| Specifier | Meaning | Expanded Format |
+|-----------|---------|----------------|
+| `d` | Short date | `MM/dd/yyyy` |
+| `D` | Long date | `dddd, MMMM dd, yyyy` |
+| `f` | Full date/time (short time) | `dddd, MMMM dd, yyyy HH:mm` |
+| `F` | Full date/time (long time) | `dddd, MMMM dd, yyyy HH:mm:ss` |
+| `g` | General (short time) | `MM/dd/yyyy HH:mm` |
+| `G` | General (long time) | `MM/dd/yyyy HH:mm:ss` |
+| `M` / `m` | Month/day | `MMMM dd` |
+| `O` / `o` | Round-trip | `yyyy-MM-ddTHH:mm:ss.fffffff` |
+| `R` / `r` | RFC1123 | `ddd, dd MMM yyyy HH:mm:ss 'GMT'` |
+| `s` | Sortable | `yyyy-MM-ddTHH:mm:ss` |
+| `t` | Short time | `HH:mm` |
+| `T` | Long time | `HH:mm:ss` |
+| `u` | Universal sortable | `yyyy-MM-dd HH:mm:ss'Z'` |
+| `U` | Universal full | Converts to UTC, then uses `F` format |
+| `Y` / `y` | Year/month | `yyyy MMMM` |
+
+```cpp
+dt.ToString("d");     // "06/07/2024"
+dt.ToString("D");     // "Friday, June 07, 2024"
+dt.ToString("o");     // "2024-06-07T14:30:45.7890000"
+dt.ToString("s");     // "2024-06-07T14:30:45"
+dt.ToString("U");     // "Friday, June 07, 2024 06:30:45" (UTC)
+```
+
+#### Custom Format Specifiers
 
 | Specifier | Description | Example |
 |-----------|-------------|---------|
@@ -173,6 +203,10 @@ DateTime dt = DateTime::Parse("06/07/2024");
 // Parse with explicit format
 DateTime dt = DateTime::Parse("2024/06/07 14:30:00", "yyyy/MM/dd HH:mm:ss");
 DateTime dt = DateTime::Parse("06/07/2024 02:30:00 PM", "MM/dd/yyyy hh:mm:ss tt");
+
+// Parse with predefined format shorthand
+DateTime dt = DateTime::Parse("06/07/2024", "d");                // short date
+DateTime dt = DateTime::Parse("2024-06-07T14:30:00", "s");       // sortable
 
 // TryParse (safe version)
 DateTime result;

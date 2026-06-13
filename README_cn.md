@@ -129,7 +129,37 @@ mingw32-make test    # 编译 test/test.cpp
 
 ### ToString 格式
 
-使用 C# 风格的格式字符串：
+使用 C# 风格的格式字符串，同时支持**预定义简写**（单字符）和**自定义**格式说明符。
+
+#### 预定义格式简写
+
+| 说明符 | 含义 | 展开格式 |
+|--------|------|---------|
+| `d` | 短日期 | `MM/dd/yyyy` |
+| `D` | 长日期 | `dddd, MMMM dd, yyyy` |
+| `f` | 完整日期+短时间 | `dddd, MMMM dd, yyyy HH:mm` |
+| `F` | 完整日期+长时间 | `dddd, MMMM dd, yyyy HH:mm:ss` |
+| `g` | 常规+短时间 | `MM/dd/yyyy HH:mm` |
+| `G` | 常规+长时间 | `MM/dd/yyyy HH:mm:ss` |
+| `M` / `m` | 月/日 | `MMMM dd` |
+| `O` / `o` | 往返（Round-trip） | `yyyy-MM-ddTHH:mm:ss.fffffff` |
+| `R` / `r` | RFC1123 | `ddd, dd MMM yyyy HH:mm:ss 'GMT'` |
+| `s` | 可排序（Sortable） | `yyyy-MM-ddTHH:mm:ss` |
+| `t` | 短时间 | `HH:mm` |
+| `T` | 长时间 | `HH:mm:ss` |
+| `u` | 通用可排序 | `yyyy-MM-dd HH:mm:ss'Z'` |
+| `U` | 通用完整 | 先转换 UTC，再使用 `F` 格式 |
+| `Y` / `y` | 年/月 | `yyyy MMMM` |
+
+```cpp
+dt.ToString("d");     // "06/07/2024"
+dt.ToString("D");     // "Friday, June 07, 2024"
+dt.ToString("o");     // "2024-06-07T14:30:45.7890000"
+dt.ToString("s");     // "2024-06-07T14:30:45"
+dt.ToString("U");     // "Friday, June 07, 2024 06:30:45" (UTC)
+```
+
+#### 自定义格式说明符
 
 | 格式符 | 说明 | 示例 |
 |--------|------|------|
@@ -173,6 +203,10 @@ DateTime dt = DateTime::Parse("06/07/2024");
 // 指定格式解析
 DateTime dt = DateTime::Parse("2024年06月07日", "yyyy'年'MM'月'dd'日'");
 DateTime dt = DateTime::Parse("06/07/2024 02:30:00 PM", "MM/dd/yyyy hh:mm:ss tt");
+
+// 使用预定义格式简写
+DateTime dt = DateTime::Parse("06/07/2024", "d");                // 短日期
+DateTime dt = DateTime::Parse("2024-06-07T14:30:00", "s");       // 可排序格式
 
 // TryParse（安全版本）
 DateTime result;
